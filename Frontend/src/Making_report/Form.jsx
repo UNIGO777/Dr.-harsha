@@ -6,6 +6,7 @@ import dataFields, {
   surgicalHistoryFields
 } from './DataFeilds'
 import { searchMedicines, searchProcedures } from './clinicalTablesService'
+import { uploadToGpt } from './gptService'
 
 const Form = () => {
   const getControlClassName = (hasError) =>
@@ -511,17 +512,7 @@ const Form = () => {
 
     try {
       const { prompt, allowedKeys } = getImportConfig(stepId)
-      const formData = new FormData()
-      formData.append('prompt', prompt)
-      for (const f of files) formData.append('files', f)
-
-      const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3000'
-      const res = await fetch(`${apiBase}/api/gpt`, { method: 'POST', body: formData })
-      const data = await res.json().catch(() => null)
-      if (!res.ok) {
-        setImportState(stepId, { error: data?.error || 'Import failed' })
-        return
-      }
+      const data = await uploadToGpt({ prompt, files })
 
       const json = extractJsonFromText(data?.content)
       if (!json) {
@@ -555,7 +546,7 @@ const Form = () => {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex flex-col gap-1">
             <div className="text-sm font-semibold text-slate-900">Import from document or image</div>
-            <div className="text-sm text-slate-600">Upload PDF or image to auto-fill this step.</div>
+            <div className="text-sm text-slate-600">Upload PDF, DOCX, or image to auto-fill this step.</div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -568,7 +559,7 @@ const Form = () => {
             <input
               id={inputId}
               type="file"
-              accept="application/pdf,image/*"
+              accept="application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/*"
               multiple
               onChange={(e) => setImportFiles(stepId, Array.from(e.target.files ?? []))}
               className="hidden"
@@ -604,7 +595,7 @@ const Form = () => {
             </div>
             <div className="flex flex-col gap-1">
               <div className="text-sm font-semibold text-slate-900">Drag & drop files here</div>
-              <div className="text-sm text-slate-600">PDF, PNG, JPG, WEBP supported.</div>
+              <div className="text-sm text-slate-600">PDF, DOCX, PNG, JPG, WEBP supported.</div>
             </div>
           </div>
 
@@ -1046,7 +1037,7 @@ const Form = () => {
 
   return (
     <form onSubmit={onGenerate} className="mx-auto w-full  p-4">
-      <div className="overflow-hidden rounded-2xl border border-slate-200 h-screen bg-white shadow-sm">
+      <div className="overflow-hidden rounded-2xl border border-slate-200 h-[95vh] bg-white shadow-sm">
         <div className="grid grid-cols-1 lg:grid-cols-[320px_1fr] h-full">
           <aside className="bg-emerald-50 px-6 py-8">
             <div className="flex flex-col gap-2">
@@ -1057,7 +1048,7 @@ const Form = () => {
             <div className="mt-8 hidden lg:block">
               <div className="relative">
                 <div className="absolute left-[15px] top-4 h-[calc(100%-16px)] w-px bg-emerald-200" />
-                <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-6 ">
                   {steps.map((s, i) => {
                     const isActive = i === stepIndex
                     const isDone = i < stepIndex
@@ -1136,7 +1127,7 @@ const Form = () => {
             </div>
           </aside>
 
-          <main className="px-6 py-8">
+          <main className="px-6 py-8 overflow-scroll">
             <div className="flex flex-col gap-1">
               <div className="text-sm font-semibold text-emerald-700">
                 Step {stepIndex + 1} of {steps.length}

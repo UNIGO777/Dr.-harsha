@@ -2,6 +2,7 @@ import express from "express";
 import multer from "multer";
 import OpenAI from "openai";
 import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -52,6 +53,10 @@ function isPdfMime(mime) {
   return mime === "application/pdf";
 }
 
+function isDocxMime(mime) {
+  return mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -89,8 +94,9 @@ gptRouter.post("/gpt", upload.array("files", 6), async (req, res) => {
     const files = Array.isArray(req.files) ? req.files : [];
     const imageFiles = files.filter((f) => isImageMime(f.mimetype));
     const pdfFiles = files.filter((f) => isPdfMime(f.mimetype));
+    const docxFiles = files.filter((f) => isDocxMime(f.mimetype));
     const unsupportedFiles = files.filter(
-      (f) => !isImageMime(f.mimetype) && !isPdfMime(f.mimetype)
+      (f) => !isImageMime(f.mimetype) && !isPdfMime(f.mimetype) && !isDocxMime(f.mimetype)
     );
 
     if (unsupportedFiles.length > 0) {
@@ -128,7 +134,17 @@ gptRouter.post("/gpt", upload.array("files", 6), async (req, res) => {
       pdfText += `\n\n[PDF: ${f.originalname}]\n${capped}`;
     }
 
-    const contentParts = [{ type: "text", text: `${baseText}${pdfText}` }];
+    let docxText = "";
+    for (const f of docxFiles) {
+      const result = await mammoth.extractRawText({ buffer: f.buffer });
+      const extracted = typeof result?.value === "string" ? result.value : "";
+      const trimmed = extracted.trim();
+      if (trimmed.length === 0) continue;
+      const capped = trimmed.length > 20000 ? trimmed.slice(0, 20000) : trimmed;
+      docxText += `\n\n[DOCX: ${f.originalname}]\n${capped}`;
+    }
+
+    const contentParts = [{ type: "text", text: `${baseText}${pdfText}${docxText}` }];
     for (const f of imageFiles) {
       const b64 = f.buffer.toString("base64");
       const dataUrl = `data:${f.mimetype};base64,${b64}`;
