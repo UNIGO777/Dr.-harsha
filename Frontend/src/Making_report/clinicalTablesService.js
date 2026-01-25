@@ -15,6 +15,30 @@ export const searchProcedures = async (terms, { signal } = {}) => {
     .filter((v) => typeof v === 'string' && v.trim().length > 0)
 }
 
+export const searchIllness = async (terms, { signal } = {}) => {
+  const q = typeof terms === 'string' ? terms.trim() : ''
+  if (!q) return []
+
+  const url = `https://clinicaltables.nlm.nih.gov/api/conditions/v3/search?terms=${encodeURIComponent(q)}`
+  const res = await fetch(url, { signal })
+  if (!res.ok) throw new Error('Search failed')
+
+  const data = await res.json().catch(() => null)
+  const codes = Array.isArray(data?.[1]) ? data[1] : []
+  const rawNames = Array.isArray(data?.[3]) ? data[3] : []
+
+  const pairs = rawNames
+    .map((item, index) => {
+      const name = Array.isArray(item) ? String(item[0] ?? '').trim() : String(item ?? '').trim()
+      const code = String(codes[index] ?? '').trim()
+      if (!name) return ''
+      return code ? `${name} (${code})` : name
+    })
+    .filter((v) => v)
+
+  return Array.from(new Set(pairs))
+}
+
 export const searchMedicines = async (name, { signal } = {}) => {
   const q = typeof name === 'string' ? name.trim() : ''
   if (!q) return []

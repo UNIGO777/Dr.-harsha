@@ -5,7 +5,7 @@ import dataFields, {
   patientBasicDetailsFields,
   surgicalHistoryFields
 } from './DataFeilds'
-import { searchMedicines, searchProcedures } from './clinicalTablesService'
+import { searchIllness, searchMedicines, searchProcedures } from './clinicalTablesService'
 import { uploadToGpt } from './gptService'
 
 const Form = () => {
@@ -394,6 +394,98 @@ const Form = () => {
     }
   }
 
+  const normalizeMonth = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const n = Math.trunc(value)
+      if (n >= 1 && n <= 12) return String(n).padStart(2, '0')
+      return ''
+    }
+
+    if (typeof value !== 'string') return ''
+    const v = value.trim()
+    if (!v) return ''
+
+    const numeric = v.match(/^(\d{1,2})$/)
+    if (numeric) {
+      const n = Number(numeric[1])
+      if (Number.isFinite(n) && n >= 1 && n <= 12) return String(n).padStart(2, '0')
+    }
+
+    const map = {
+      jan: '01',
+      january: '01',
+      feb: '02',
+      february: '02',
+      mar: '03',
+      march: '03',
+      apr: '04',
+      april: '04',
+      may: '05',
+      jun: '06',
+      june: '06',
+      jul: '07',
+      july: '07',
+      aug: '08',
+      august: '08',
+      sep: '09',
+      sept: '09',
+      september: '09',
+      oct: '10',
+      october: '10',
+      nov: '11',
+      november: '11',
+      dec: '12',
+      december: '12'
+    }
+
+    const key = v.toLowerCase()
+    return map[key] ?? map[key.slice(0, 3)] ?? ''
+  }
+
+  const normalizeYear = (value) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      const n = Math.trunc(value)
+      if (String(n).length === 4) return String(n)
+      return ''
+    }
+
+    if (typeof value !== 'string') return ''
+    const v = value.trim()
+    if (!v) return ''
+    if (/^\d{4}$/.test(v)) return v
+    const match = v.match(/(\d{4})/)
+    return match?.[1] ?? ''
+  }
+
+  const normalizeSurgeries = (value) => {
+    const list = Array.isArray(value) ? value : value && typeof value === 'object' ? [value] : []
+
+    return list
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+
+        const surgeryNameRaw =
+          typeof item.surgeryName === 'string'
+            ? item.surgeryName
+            : typeof item.name === 'string'
+              ? item.name
+              : typeof item.procedureName === 'string'
+                ? item.procedureName
+                : typeof item.procedure === 'string'
+                  ? item.procedure
+                  : ''
+
+        const surgeryName = String(surgeryNameRaw ?? '').trim()
+        const surgeryMonth = normalizeMonth(item.surgeryMonth ?? item.month ?? '')
+        const surgeryYear = normalizeYear(item.surgeryYear ?? item.year ?? '')
+
+        const normalized = { surgeryName, surgeryMonth, surgeryYear }
+        const hasAny = Object.values(normalized).some((v) => typeof v === 'string' && v.trim().length > 0)
+        return hasAny ? normalized : null
+      })
+      .filter(Boolean)
+  }
+
   const applyImportedData = (incoming, allowedKeys) => {
     if (!incoming || typeof incoming !== 'object') return
 
@@ -409,7 +501,7 @@ const Form = () => {
       if (allow('illness') && Array.isArray(incoming.illness)) next.illness = incoming.illness
       if (allow('medicalHistory') && Array.isArray(incoming.medicalHistory))
         next.medicalHistory = incoming.medicalHistory
-      if (allow('surgeries') && Array.isArray(incoming.surgeries)) next.surgeries = incoming.surgeries
+      if (allow('surgeries') && incoming.surgeries) next.surgeries = normalizeSurgeries(incoming.surgeries)
       if (allow('familyMembers') && Array.isArray(incoming.familyMembers))
         next.familyMembers = incoming.familyMembers
 
@@ -844,6 +936,46 @@ const Form = () => {
                             placeholder={field.placeholder ?? ''}
                             onChange={(v) => setRepeatableValue(listKey, index, field.key, v)}
                             searchFn={searchMedicines}
+                          />
+                        </div>
+                      )
+                    }
+
+                    if (listKey === 'surgeries' && field.key === 'surgeryName') {
+                      return (
+                        <div key={field.key} className="flex flex-col gap-1">
+                          <label
+                            htmlFor={fieldId}
+                            className="text-sm font-medium text-slate-700"
+                          >
+                            {field.label}
+                          </label>
+                          <SearchSelect
+                            id={fieldId}
+                            value={currentValue}
+                            placeholder={field.placeholder ?? ''}
+                            onChange={(v) => setRepeatableValue(listKey, index, field.key, v)}
+                            searchFn={searchProcedures}
+                          />
+                        </div>
+                      )
+                    }
+
+                    if (listKey === 'familyMembers' && field.key === 'illness') {
+                      return (
+                        <div key={field.key} className="flex flex-col gap-1">
+                          <label
+                            htmlFor={fieldId}
+                            className="text-sm font-medium text-slate-700"
+                          >
+                            {field.label}
+                          </label>
+                          <SearchSelect
+                            id={fieldId}
+                            value={currentValue}
+                            placeholder={field.placeholder ?? ''}
+                            onChange={(v) => setRepeatableValue(listKey, index, field.key, v)}
+                            searchFn={searchIllness}
                           />
                         </div>
                       )
