@@ -3,6 +3,7 @@ import multer from "multer";
 import OpenAI from "openai";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
+import crypto from "node:crypto";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -38,6 +39,24 @@ function getTextFromMessageContent(content) {
     .filter((p) => p && p.type === "text" && typeof p.text === "string")
     .map((p) => p.text)
     .join("\n");
+}
+
+function getTextFromResponsesOutput(response) {
+  if (requireString(response?.output_text)) return response.output_text;
+  const output = response?.output;
+  if (!Array.isArray(output)) return "";
+
+  const texts = [];
+  for (const item of output) {
+    const content = item?.content;
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      if (part?.type === "output_text" && typeof part.text === "string") texts.push(part.text);
+      else if (part?.type === "text" && typeof part.text === "string") texts.push(part.text);
+    }
+  }
+
+  return texts.join("\n");
 }
 
 function isImageMime(mime) {
@@ -173,6 +192,169 @@ gptRouter.post("/gpt", upload.array("files", 6), async (req, res) => {
       model: completion.model,
       content,
       usage: completion.usage ?? null
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+function safeParseJsonObject(text) {
+  if (!requireString(text)) return null;
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripBrandingFromAdvancedBodyCompositionPayload(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const report = payload.report;
+  if (!report || typeof report !== "object" || Array.isArray(report)) return payload;
+
+  const next = { ...payload, report: { ...report } };
+  next.report.brand = null;
+  next.report.deviceCode = null;
+  next.report.title = "Body Composition Analysis Report";
+  return next;
+}
+
+gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, res) => {
+  try {
+    const openai = getOpenAIClient();
+    if (!openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+
+    const file = req.file;
+    if (!file || !isPdfMime(file.mimetype)) {
+      return res.status(400).json({ error: "Upload a single PDF as field name 'file'." });
+    }
+
+    const parsed = await pdfParse(file.buffer);
+    const extractedText = typeof parsed?.text === "string" ? parsed.text.trim() : "";
+    const requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : String(Date.now());
+
+    const schemaHint = [
+      "Return ONLY valid JSON. Do not include markdown.",
+      "Extract values from the body composition report and fill what you can; use null if missing.",
+      "Use numbers (not strings) for numeric values.",
+      "",
+      "Return JSON with this structure:",
+      "{",
+      '  "requestId": string,',
+      '  "report": {',
+      '    "title": string|null,',
+      '    "deviceCode": string|null,',
+      '    "brand": string|null,',
+      '    "person": { "id": string|null, "heightCm": number|null, "age": number|null, "gender": string|null, "testDateTime": string|null },',
+      '    "score": number|null,',
+      '    "bodyComposition": {',
+      '      "totalBodyWater": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '      "protein": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '      "mineral": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '      "bodyFatMass": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '      "summary": {',
+      '        "totalBodyWater": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '        "softLeanMass": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '        "fatFreeMass": { "value": number|null, "unit": string|null, "rangeText": string|null },',
+      '        "weight": { "value": number|null, "unit": string|null, "rangeText": string|null }',
+      "      }",
+      "    },",
+      '    "muscleFatAnalysis": {',
+      '      "weightKg": number|null,',
+      '      "skeletalMuscleMassKg": number|null,',
+      '      "bodyFatMassKg": number|null',
+      "    },",
+      '    "obesityAnalysis": {',
+      '      "bmi": number|null,',
+      '      "percentBodyFat": number|null,',
+      '      "waistHipRatio": number|null,',
+      '      "obesityRate": number|null,',
+      '      "bmiClass": string|null,',
+      '      "pbfClass": string|null',
+      "    },",
+      '    "weightControl": {',
+      '      "targetWeightKg": number|null,',
+      '      "weightControlKg": number|null,',
+      '      "fatControlKg": number|null,',
+      '      "muscleControlKg": number|null',
+      "    },",
+      '    "segmentalLean": {',
+      '      "rightArm": { "kg": number|null, "pct": number|null },',
+      '      "leftArm": { "kg": number|null, "pct": number|null },',
+      '      "trunk": { "kg": number|null, "pct": number|null },',
+      '      "rightLeg": { "kg": number|null, "pct": number|null },',
+      '      "leftLeg": { "kg": number|null, "pct": number|null }',
+      "    },",
+      '    "segmentalMuscle": {',
+      '      "rightArmKg": number|null, "leftArmKg": number|null, "trunkKg": number|null, "rightLegKg": number|null, "leftLegKg": number|null',
+      "    },",
+      '    "segmentalFat": {',
+      '      "rightArmKg": number|null, "leftArmKg": number|null, "trunkKg": number|null, "rightLegKg": number|null, "leftLegKg": number|null',
+      "    },",
+      '    "research": { "basalMetabolicRateKcal": number|null, "visceralFatArea": number|null },',
+      '    "impedance": {',
+      '      "freq50kHz": { "rightArm": number|null, "leftArm": number|null, "trunk": number|null, "rightLeg": number|null, "leftLeg": number|null },',
+      '      "freq250kHz": { "rightArm": number|null, "leftArm": number|null, "trunk": number|null, "rightLeg": number|null, "leftLeg": number|null }',
+      "    }",
+      "  }",
+      "}"
+    ].join("\n");
+
+    if (extractedText) {
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "You extract structured data from a Body Composition Analysis Report in JSON." },
+          { role: "user", content: `${schemaHint}\n\n[REQUEST_ID]\n${requestId}\n\n[PDF_TEXT]\n${extractedText}` }
+        ]
+      });
+
+      const content = completion.choices?.[0]?.message?.content ?? "";
+      const json = stripBrandingFromAdvancedBodyCompositionPayload(safeParseJsonObject(content));
+
+      res.json({
+        requestId,
+        data: json,
+        raw: json ? null : content
+      });
+      return;
+    }
+
+    const base64 = file.buffer.toString("base64");
+    const fileDataUrl = `data:application/pdf;base64,${base64}`;
+
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      text: { format: { type: "json_object" } },
+      input: [
+        {
+          role: "system",
+          content: "You extract structured data from a Body Composition Analysis Report in JSON."
+        },
+        {
+          role: "user",
+          content: [
+            { type: "input_file", filename: file.originalname || "report.pdf", file_data: fileDataUrl },
+            { type: "input_text", text: `${schemaHint}\n\n[REQUEST_ID]\n${requestId}` }
+          ]
+        }
+      ]
+    });
+
+    const content = getTextFromResponsesOutput(response);
+    const json = stripBrandingFromAdvancedBodyCompositionPayload(safeParseJsonObject(content));
+
+    res.json({
+      requestId,
+      data: json,
+      raw: json ? null : content
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
