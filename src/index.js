@@ -96,6 +96,26 @@ app.use((err, req, res, next) => {
   const requestId = res.getHeader("x-request-id") || "unknown";
   console.error(`[${requestId}] handler error:`, err);
   if (res.headersSent) return next(err);
+
+  if (err && typeof err === "object") {
+    const name = typeof err.name === "string" ? err.name : "";
+    const code = typeof err.code === "string" ? err.code : "";
+    if (name === "MulterError") {
+      if (code === "LIMIT_FILE_SIZE") {
+        const maxMb = process.env.MAX_UPLOAD_MB || "15";
+        return res.status(413).json({ error: `File too large. Max allowed is ${maxMb}MB.` });
+      }
+      if (code === "LIMIT_FILE_COUNT" || code === "LIMIT_UNEXPECTED_FILE") {
+        return res.status(400).json({ error: "Too many files uploaded." });
+      }
+      return res.status(400).json({ error: "Invalid upload." });
+    }
+
+    if (code === "entity.too.large") {
+      return res.status(413).json({ error: "Request body too large." });
+    }
+  }
+
   res.status(500).json({ error: err instanceof Error ? err.message : "Internal Server Error" });
 });
 

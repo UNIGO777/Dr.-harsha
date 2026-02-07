@@ -76,10 +76,17 @@ function isDocxMime(mime) {
   return mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 }
 
+const MAX_UPLOAD_MB = (() => {
+  const raw = process.env.MAX_UPLOAD_MB;
+  const n = typeof raw === "string" ? Number(raw) : null;
+  if (!Number.isFinite(n) || n <= 0) return 15;
+  return Math.min(Math.round(n), 50);
+})();
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 15 * 1024 * 1024,
+    fileSize: MAX_UPLOAD_MB * 1024 * 1024,
     files: 6
   }
 });
