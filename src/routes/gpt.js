@@ -221,6 +221,162 @@ function stripBrandingFromAdvancedBodyCompositionPayload(payload) {
   return next;
 }
 
+const HEART_TESTS = [
+  "High Sensitivity C-Reactive Protein (HS-CRP)",
+  "Total Cholesterol",
+  "HDL Cholesterol",
+  "LDL Cholesterol",
+  "Triglycerides",
+  "VLDL Cholesterol",
+  "Non-HDL Cholesterol",
+  "TC / HDL Ratio",
+  "Triglyceride / HDL Ratio",
+  "LDL / HDL Ratio",
+  "HDL / LDL Ratio",
+  "Lipoprotein (a) [Lp(a)]",
+  "Apolipoprotein A1 (Apo-A1)",
+  "Apolipoprotein B (Apo-B)",
+  "Apo B / Apo A1 Ratio"
+];
+
+const URINE_TESTS = [
+  "Volume",
+  "Colour",
+  "Appearance",
+  "Specific Gravity",
+  "pH",
+  "Urinary Protein",
+  "Urinary Glucose",
+  "Urine Ketone",
+  "Urinary Bilirubin",
+  "Urobilinogen",
+  "Bile Salt",
+  "Bile Pigment",
+  "Urine Blood",
+  "Nitrite",
+  "Leucocyte Esterase",
+  "Mucus",
+  "Red Blood Cells (RBC)",
+  "Urinary Leucocytes (Pus Cells)",
+  "Epithelial Cells",
+  "Casts",
+  "Crystals",
+  "Bacteria",
+  "Yeast",
+  "Parasite",
+  "Urinary Microalbumin",
+  "Urine Creatinine",
+  "Urine Albumin/Creatinine Ratio (UA/C)"
+];
+
+const ALLOWED_STATUSES = new Set(["LOW", "HIGH", "NORMAL", "NOT_FOUND"]);
+
+function canonicalizeTestName(name) {
+  if (!requireString(name)) return "";
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function toNullOrString(value) {
+  if (value == null) return null;
+  if (typeof value === "string") return value.trim() ? value.trim() : null;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function pickFirstNumber(text) {
+  if (!requireString(text)) return null;
+  const match = String(text).match(/-?\d+(?:\.\d+)?/);
+  if (!match) return null;
+  const n = Number(match[0]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseRangeBounds(referenceRange) {
+  if (!requireString(referenceRange)) return null;
+  const range = String(referenceRange).trim();
+  const nums = range.match(/-?\d+(?:\.\d+)?/g) ?? [];
+  const numbers = nums.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+  if (numbers.length === 0) return null;
+
+  if (numbers.length >= 2 && (range.includes("-") || range.toLowerCase().includes("to"))) {
+    const min = numbers[0];
+    const max = numbers[1];
+    if (Number.isFinite(min) && Number.isFinite(max)) return { min, max, kind: "between" };
+  }
+
+  if (range.includes("<")) {
+    return { max: numbers[0], kind: "lt" };
+  }
+  if (range.includes(">")) {
+    return { min: numbers[0], kind: "gt" };
+  }
+
+  if (numbers.length >= 2) {
+    const min = numbers[0];
+    const max = numbers[1];
+    if (Number.isFinite(min) && Number.isFinite(max)) return { min, max, kind: "between" };
+  }
+
+  return null;
+}
+
+function computeStatus({ value, referenceRange, fallbackStatus }) {
+  const vText = toNullOrString(value);
+  if (vText == null) return "NOT_FOUND";
+
+  const valueNum = pickFirstNumber(vText);
+  const bounds = parseRangeBounds(toNullOrString(referenceRange));
+  if (valueNum == null || !bounds) {
+    const s = requireString(fallbackStatus) ? String(fallbackStatus).toUpperCase() : "";
+    return ALLOWED_STATUSES.has(s) ? s : "NORMAL";
+  }
+
+  if (bounds.kind === "between") {
+    if (typeof bounds.min === "number" && valueNum < bounds.min) return "LOW";
+    if (typeof bounds.max === "number" && valueNum > bounds.max) return "HIGH";
+    return "NORMAL";
+  }
+  if (bounds.kind === "lt") {
+    if (typeof bounds.max === "number" && valueNum > bounds.max) return "HIGH";
+    return "NORMAL";
+  }
+  if (bounds.kind === "gt") {
+    if (typeof bounds.min === "number" && valueNum < bounds.min) return "LOW";
+    return "NORMAL";
+  }
+
+  const s = requireString(fallbackStatus) ? String(fallbackStatus).toUpperCase() : "";
+  return ALLOWED_STATUSES.has(s) ? s : "NORMAL";
+}
+
+function buildStrictCategory(list, incoming) {
+  const incomingTests = Array.isArray(incoming?.tests) ? incoming.tests : [];
+  const map = new Map();
+  for (const t of incomingTests) {
+    const name = toNullOrString(t?.testName);
+    if (!name) continue;
+    map.set(canonicalizeTestName(name), t);
+  }
+
+  const tests = list.map((testName) => {
+    const entry = map.get(canonicalizeTestName(testName));
+    const value = toNullOrString(entry?.value);
+    const unit = toNullOrString(entry?.unit);
+    const referenceRange = toNullOrString(entry?.referenceRange);
+    const status = computeStatus({ value, referenceRange, fallbackStatus: entry?.status });
+    return {
+      testName,
+      value: status === "NOT_FOUND" ? null : value,
+      unit: status === "NOT_FOUND" ? null : unit,
+      referenceRange: status === "NOT_FOUND" ? null : referenceRange,
+      status
+    };
+  });
+
+  const data = tests.some((t) => t.status !== "NOT_FOUND");
+  return { data, tests };
+}
+
 gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, res) => {
   try {
     const openai = getOpenAIClient();
@@ -356,6 +512,181 @@ gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, 
       data: json,
       raw: json ? null : content
     });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post("/heart-urine-analysis", upload.single("file"), async (req, res) => {
+  try {
+    const openai = getOpenAIClient();
+    if (!openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+
+    const file = req.file;
+    if (!file || !isPdfMime(file.mimetype)) {
+      return res.status(400).json({ error: "Upload a single PDF as field name 'file'." });
+    }
+
+    const systemPrompt = `You are a medical report extraction engine.
+
+You must strictly extract test data from a medical PDF.
+You must follow the provided test list exactly.
+You must not skip any test.
+You must not invent data.
+You must not explain anything.
+You must return JSON only.
+
+If a test from the list is not present in the PDF, mark:
+"value": null
+"unit": null
+"referenceRange": null
+"status": "NOT_FOUND"`;
+
+    const userPrompt = `Extract HEART and URINE test data from the uploaded medical PDF.
+
+You MUST search ONLY for the following tests.
+
+HEART TEST LIST:
+- High Sensitivity C-Reactive Protein (HS-CRP)
+- Total Cholesterol
+- HDL Cholesterol
+- LDL Cholesterol
+- Triglycerides
+- VLDL Cholesterol
+- Non-HDL Cholesterol
+- TC / HDL Ratio
+- Triglyceride / HDL Ratio
+- LDL / HDL Ratio
+- HDL / LDL Ratio
+- Lipoprotein (a) [Lp(a)]
+- Apolipoprotein A1 (Apo-A1)
+- Apolipoprotein B (Apo-B)
+- Apo B / Apo A1 Ratio
+
+URINE TEST LIST:
+- Volume
+- Colour
+- Appearance
+- Specific Gravity
+- pH
+- Urinary Protein
+- Urinary Glucose
+- Urine Ketone
+- Urinary Bilirubin
+- Urobilinogen
+- Bile Salt
+- Bile Pigment
+- Urine Blood
+- Nitrite
+- Leucocyte Esterase
+- Mucus
+- Red Blood Cells (RBC)
+- Urinary Leucocytes (Pus Cells)
+- Epithelial Cells
+- Casts
+- Crystals
+- Bacteria
+- Yeast
+- Parasite
+- Urinary Microalbumin
+- Urine Creatinine
+- Urine Albumin/Creatinine Ratio (UA/C)
+
+For EACH test return:
+- testName
+- value
+- unit
+- referenceRange
+- status
+
+Status Rules:
+- If value < range \u2192 LOW
+- If value > range \u2192 HIGH
+- If within range \u2192 NORMAL
+- If test not present \u2192 NOT_FOUND
+
+CATEGORY RULE:
+- If ALL heart tests are NOT_FOUND \u2192 heart.data = false
+- If ALL urine tests are NOT_FOUND \u2192 urine.data = false
+- Else \u2192 data = true
+
+FINAL JSON FORMAT ONLY:
+
+{
+  "heart": {
+    "data": true | false,
+    "tests": [
+      {
+        "testName": "",
+        "value": "",
+        "unit": "",
+        "referenceRange": "",
+        "status": ""
+      }
+    ]
+  },
+  "urine": {
+    "data": true | false,
+    "tests": [
+      {
+        "testName": "",
+        "value": "",
+        "unit": "",
+        "referenceRange": "",
+        "status": ""
+      }
+    ]
+  }
+}
+
+Do not add extra keys.
+Do not add text.
+Return JSON only.`;
+
+    const parsed = await pdfParse(file.buffer);
+    const extractedText = typeof parsed?.text === "string" ? parsed.text.trim() : "";
+
+    let content = "";
+    if (extractedText) {
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+          { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
+        ]
+      });
+      content = completion.choices?.[0]?.message?.content ?? "";
+    } else {
+      const base64 = file.buffer.toString("base64");
+      const fileDataUrl = `data:application/pdf;base64,${base64}`;
+      const response = await openai.responses.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0,
+        text: { format: { type: "json_object" } },
+        input: [
+          { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+          {
+            role: "user",
+            content: [
+              { type: "input_file", filename: file.originalname || "report.pdf", file_data: fileDataUrl },
+              { type: "input_text", text: userPrompt }
+            ]
+          }
+        ]
+      });
+      content = getTextFromResponsesOutput(response);
+    }
+
+    const parsedJson = safeParseJsonObject(content) ?? {};
+    const heart = buildStrictCategory(HEART_TESTS, parsedJson.heart);
+    const urine = buildStrictCategory(URINE_TESTS, parsedJson.urine);
+
+    res.json({ heart, urine });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
