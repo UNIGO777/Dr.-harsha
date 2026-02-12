@@ -93,16 +93,45 @@ function collectUploadedFiles(req) {
 }
 
 async function extractPdfTextForPrompt(pdfFiles) {
-  const maxPdfTextChars = 50000;
+  const maxPdfTextChars = 80000;
   let extractedText = "";
   for (const f of pdfFiles) {
     if (extractedText.length >= maxPdfTextChars) break;
     const parsed = await pdfParse(f.buffer);
     const extracted = typeof parsed?.text === "string" ? parsed.text : "";
-    const capped = capTextForPrompt(extracted, 4000);
+    const capped = capTextForPromptWithAnchors(extracted, 12000, [
+      "Complete Urinogram",
+      "Urinogram",
+      "Microscopic Examination",
+      "Chemical Examination",
+      "Urinary Protein",
+      "Urinary Glucose"
+    ]);
     if (!capped) continue;
     const next = `\n\n[PDF: ${f.originalname}]\n${capped}`;
     extractedText = (extractedText + next).slice(0, maxPdfTextChars);
+  }
+  return extractedText;
+}
+
+async function extractDocxTextForPrompt(docxFiles) {
+  const maxDocxTextChars = 80000;
+  let extractedText = "";
+  for (const f of docxFiles) {
+    if (extractedText.length >= maxDocxTextChars) break;
+    const result = await mammoth.extractRawText({ buffer: f.buffer });
+    const extracted = typeof result?.value === "string" ? result.value : "";
+    const capped = capTextForPromptWithAnchors(extracted, 12000, [
+      "Complete Urinogram",
+      "Urinogram",
+      "Microscopic Examination",
+      "Chemical Examination",
+      "Urinary Protein",
+      "Urinary Glucose"
+    ]);
+    if (!capped) continue;
+    const next = `\n\n[DOCX: ${f.originalname}]\n${capped}`;
+    extractedText = (extractedText + next).slice(0, maxDocxTextChars);
   }
   return extractedText;
 }
@@ -297,6 +326,30 @@ const HEART_TESTS = [
   "Apo B / Apo A1 Ratio"
 ];
 
+const HEART_RELATED_EXTRACT_TESTS = [
+  "HS-CRP",
+  "Homocysteine",
+  "Lipoprotein (a) [Lp(a)]",
+  "Apolipoprotein A1",
+  "Apolipoprotein B",
+  "Apo B / Apo A1 Ratio",
+  "Total Cholesterol",
+  "HDL Cholesterol",
+  "LDL Cholesterol",
+  "Triglycerides",
+  "VLDL",
+  "Non-HDL Cholesterol",
+  "TC/HDL Ratio",
+  "LDL/HDL Ratio",
+  "Triglyceride/HDL Ratio",
+  "HDL/LDL Ratio",
+  "Fasting Blood Sugar",
+  "HbA1c",
+  "Average Blood Glucose",
+  "Magnesium",
+  "eGFR"
+];
+
 const URINE_TESTS = [
   "Volume",
   "Colour",
@@ -325,6 +378,33 @@ const URINE_TESTS = [
   "Urinary Microalbumin",
   "Urine Creatinine",
   "Urine Albumin/Creatinine Ratio (UA/C)"
+];
+
+const URINOGRAM_EXTRACT_TESTS = [
+  "Volume",
+  "Colour",
+  "Appearance",
+  "Specific Gravity",
+  "pH",
+  "Urinary Protein",
+  "Urinary Glucose",
+  "Urine Ketone",
+  "Urinary Bilirubin",
+  "Urobilinogen",
+  "Bile Salt",
+  "Bile Pigment",
+  "Urine Blood",
+  "Nitrite",
+  "Leucocyte Esterase",
+  "Mucus",
+  "Red Blood Cells",
+  "Urinary Leucocytes (Pus Cells)",
+  "Epithelial Cells",
+  "Casts",
+  "Crystals",
+  "Bacteria",
+  "Yeast",
+  "Parasite"
 ];
 
 function canonicalizeTestName(name) {
@@ -662,11 +742,47 @@ function capTextForPrompt(text, maxChars) {
   const trimmed = typeof text === "string" ? text.trim() : "";
   if (!trimmed) return "";
   if (trimmed.length <= maxChars) return trimmed;
-  const headChars = Math.floor(maxChars * 0.65);
-  const tailChars = maxChars - headChars;
+  const headChars = Math.floor(maxChars * 0.4);
+  const midChars = Math.floor(maxChars * 0.2);
+  const tailChars = maxChars - headChars - midChars;
+
   const head = trimmed.slice(0, headChars);
-  const tail = trimmed.slice(trimmed.length - tailChars);
-  return `${head}\n...\n${tail}`;
+
+  const midStart = Math.max(0, Math.floor(trimmed.length / 2 - midChars / 2));
+  const middle = trimmed.slice(midStart, midStart + midChars);
+
+  const tail = trimmed.slice(Math.max(0, trimmed.length - tailChars));
+
+  return `${head}\n...\n[MIDDLE]\n${middle}\n...\n[END]\n${tail}`;
+}
+
+function capTextForPromptWithAnchors(text, maxChars, anchors) {
+  const trimmed = typeof text === "string" ? text.trim() : "";
+  if (!trimmed) return "";
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const list = Array.isArray(anchors) ? anchors.filter(requireString) : [];
+  const haystack = trimmed.toUpperCase();
+  let matchIndex = -1;
+  for (const a of list) {
+    const idx = haystack.indexOf(String(a).toUpperCase());
+    if (idx >= 0 && (matchIndex === -1 || idx < matchIndex)) matchIndex = idx;
+  }
+
+  if (matchIndex === -1) return capTextForPrompt(trimmed, maxChars);
+
+  const headChars = Math.floor(maxChars * 0.25);
+  const anchorChars = Math.floor(maxChars * 0.5);
+  const tailChars = Math.max(0, maxChars - headChars - anchorChars);
+
+  const head = trimmed.slice(0, headChars);
+
+  const anchorStart = Math.max(0, Math.floor(matchIndex - anchorChars / 2));
+  const anchorBlock = trimmed.slice(anchorStart, anchorStart + anchorChars);
+
+  const tail = trimmed.slice(Math.max(0, trimmed.length - tailChars));
+
+  return `${head}\n...\n[FOCUS]\n${anchorBlock}\n...\n[END]\n${tail}`;
 }
 
 function bulletList(list) {
@@ -747,12 +863,17 @@ async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames
 
 You must strictly extract test data from medical PDF(s).
 You must follow the provided test list exactly.
+You must not skip any test.
 You must not invent data.
 You must not explain anything.
 You must return JSON only.
 You must extract the exact value text from the PDF(s). Do not modify the value.
-Only include tests that are present in the PDF(s).
-Do NOT include tests that are not present.`;
+
+If a test from the list is not present in the PDF(s), mark:
+"value": null
+"unit": null
+"referenceRange": null
+"status": "NOT_PRESENTED"`;
 
   const userPrompt = `Extract test data from the uploaded medical PDF(s).
 
@@ -761,9 +882,7 @@ You MUST search ONLY for the following tests:
 TEST LIST:
 ${bulletList(testNames)}
 
-Return only the tests that are present in the PDF(s).
-
-For EACH returned test return:
+For EACH test return:
 - testName
 - value
 - unit
@@ -774,7 +893,7 @@ Status Rules:
 - If value < range \u2192 LOW
 - If value > range \u2192 HIGH
 - If within range \u2192 NORMAL
-- Do NOT return tests that are not present
+- If test not present \u2192 NOT_PRESENTED
 
 Return JSON ONLY with this format:
 {
@@ -822,6 +941,326 @@ Return JSON only.`;
 
   const parsedJson = safeParseJsonObject(content) ?? {};
   return normalizeIncomingTests(parsedJson);
+}
+
+function normalizeHeartRelatedIncomingTests(parsedJson) {
+  const arr = Array.isArray(parsedJson?.heart_related_tests) ? parsedJson.heart_related_tests : [];
+  return arr
+    .map((t) => {
+      if (!t || typeof t !== "object" || Array.isArray(t)) return null;
+      const testName =
+        toNullOrString(t?.test_name) ?? toNullOrString(t?.testName) ?? toNullOrString(t?.name);
+      if (!testName) return null;
+      const value = toNullOrString(t?.observed_value) ?? toNullOrString(t?.value);
+      const unit = toNullOrString(t?.units) ?? toNullOrString(t?.unit);
+      const referenceRange = toNullOrString(t?.reference_range) ?? toNullOrString(t?.referenceRange);
+      const status = toNullOrString(t?.status);
+      return { testName, value, unit, referenceRange, status };
+    })
+    .filter(Boolean);
+}
+
+async function extractHeartRelatedTestsFromPdfs({ openai, pdfFiles, extractedText }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return markdown.
+Do not return explanations.
+Do not return text outside JSON.`;
+
+  const userPrompt = `Extract all heart-related tests from the medical report.
+
+Heart-related tests include:
+${bulletList(HEART_RELATED_EXTRACT_TESTS)}
+
+Return ONLY valid JSON.
+Do not return markdown.
+Do not return explanations.
+Do not return text outside JSON.
+
+JSON format must be:
+{
+  "heart_related_tests": [
+    {
+      "test_name": "",
+      "observed_value": "",
+      "units": "",
+      "reference_range": "",
+      "status": ""
+    }
+  ]
+}
+
+Status must be one of:
+"Normal", "High", "Low", "Very High", "Borderline"
+
+If a test is not found, do not include it.`;
+
+  let content = "";
+  if (requireString(extractedText)) {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  } else {
+    const fileParts = pdfFiles.map((f) => {
+      const base64 = f.buffer.toString("base64");
+      const fileDataUrl = `data:application/pdf;base64,${base64}`;
+      return { type: "input_file", filename: f.originalname || "report.pdf", file_data: fileDataUrl };
+    });
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      text: { format: { type: "json_object" } },
+      input: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        {
+          role: "user",
+          content: [...fileParts, { type: "input_text", text: userPrompt }]
+        }
+      ]
+    });
+    content = getTextFromResponsesOutput(response);
+  }
+
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeHeartRelatedIncomingTests(parsedJson);
+}
+
+function normalizeUrinogramIncomingTests(parsedJson) {
+  const arr = Array.isArray(parsedJson?.urine_tests) ? parsedJson.urine_tests : [];
+  return arr
+    .map((t) => {
+      if (!t || typeof t !== "object" || Array.isArray(t)) return null;
+      const testName =
+        toNullOrString(t?.test_name) ?? toNullOrString(t?.testName) ?? toNullOrString(t?.name);
+      if (!testName) return null;
+      const methodology = toNullOrString(t?.methodology);
+      const value = toNullOrString(t?.observed_value) ?? toNullOrString(t?.value);
+      const unit = toNullOrString(t?.units) ?? toNullOrString(t?.unit);
+      const referenceRange = toNullOrString(t?.reference_range) ?? toNullOrString(t?.referenceRange);
+      const status = toNullOrString(t?.status);
+      return { testName, methodology, value, unit, referenceRange, status };
+    })
+    .filter(Boolean);
+}
+
+function toUrinogramKey(name) {
+  const base = canonicalizeTestName(name);
+  if (!base) return "";
+  if (base.startsWith("redbloodcells")) return "redbloodcells";
+  return base;
+}
+
+function buildCompleteUrinogramTests(incomingTests) {
+  const list = Array.isArray(incomingTests) ? incomingTests : [];
+  const map = new Map();
+  for (const t of list) {
+    const key = toUrinogramKey(t?.testName);
+    if (!key) continue;
+    map.set(key, t);
+  }
+
+  return URINOGRAM_EXTRACT_TESTS.map((testName) => {
+    const key = toUrinogramKey(testName);
+    const entry = map.get(key);
+    if (entry) return { ...entry, testName };
+    return {
+      testName,
+      methodology: null,
+      value: "Not included in the PDF",
+      unit: null,
+      referenceRange: null,
+      status: "Not included in the PDF"
+    };
+  });
+}
+
+function hasUrinogramMarkers(text) {
+  const s = typeof text === "string" ? text.toUpperCase() : "";
+  if (!s.trim()) return false;
+  if (s.includes("URINOGRAM")) return true;
+  if (s.includes("COMPLETE URINOGRAM")) return true;
+  if (s.includes("MICROSCOPIC EXAMINATION")) return true;
+  if (s.includes("CHEMICAL EXAMINATION")) return true;
+  if (s.includes("URINARY PROTEIN")) return true;
+  if (s.includes("URINARY GLUCOSE")) return true;
+  return false;
+}
+
+async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, extractedText }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.
+Do not hallucinate.
+Extract values exactly as written in the report.`;
+
+  const userPrompt = `Extract ALL urinary test parameters from the medical report exactly as shown in the "Complete Urinogram" section.
+
+Include:
+
+Physical Examination:
+${bulletList(["Volume", "Colour", "Appearance", "Specific Gravity", "pH"])}
+
+Chemical Examination:
+${bulletList([
+  "Urinary Protein",
+  "Urinary Glucose",
+  "Urine Ketone",
+  "Urinary Bilirubin",
+  "Urobilinogen",
+  "Bile Salt",
+  "Bile Pigment",
+  "Urine Blood",
+  "Nitrite",
+  "Leucocyte Esterase"
+])}
+
+Microscopic Examination:
+${bulletList([
+  "Mucus",
+  "Red Blood Cells",
+  "Urinary Leucocytes (Pus Cells)",
+  "Epithelial Cells",
+  "Casts",
+  "Crystals",
+  "Bacteria",
+  "Yeast",
+  "Parasite"
+])}
+
+Strict JSON format:
+{
+  "urine_tests": [
+    {
+      "test_name": "",
+      "methodology": "",
+      "observed_value": "",
+      "units": "",
+      "reference_range": "",
+      "status": ""
+    }
+  ]
+}
+
+Rules:
+- If value matches reference range \u2192 status = "Normal"
+- If value deviates \u2192 status = "Abnormal"
+- If reference is text like "Absent" or "Clear", compare accordingly
+- Preserve text like "Present 1+(100-250 mg/dl)" exactly
+- If a parameter is not found, include it with:
+  - observed_value = "Not included in the PDF"
+  - methodology = ""
+  - units = ""
+  - reference_range = ""
+  - status = "Not included in the PDF"
+- Output must be valid JSON only.`;
+
+  let content = "";
+  const pdfList = Array.isArray(pdfFiles) ? pdfFiles : [];
+  const imageList = Array.isArray(imageFiles) ? imageFiles : [];
+  const extractedHasMarkers = hasUrinogramMarkers(extractedText);
+
+  if (requireString(extractedText) && extractedHasMarkers && imageList.length === 0) {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${extractedText}` }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+    const parsedJson = safeParseJsonObject(content) ?? {};
+    const normalized = normalizeUrinogramIncomingTests(parsedJson);
+    if (normalized.length >= Math.min(URINOGRAM_EXTRACT_TESTS.length, 10)) return normalized;
+  }
+
+  const shouldUseTextOnly = requireString(extractedText) && pdfList.length === 0 && imageList.length === 0;
+
+  if (shouldUseTextOnly) {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  } else if (imageList.length > 0 && pdfList.length === 0) {
+    const contentParts = [
+      {
+        type: "text",
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 6000, [
+          "Complete Urinogram",
+          "Urinogram",
+          "Microscopic Examination",
+          "Chemical Examination",
+          "Urinary Protein",
+          "Urinary Glucose"
+        ])}`
+      }
+    ];
+    for (const f of imageList) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  } else {
+    const fileParts = pdfList.map((f) => {
+      const base64 = f.buffer.toString("base64");
+      const fileDataUrl = `data:application/pdf;base64,${base64}`;
+      return { type: "input_file", filename: f.originalname || "report.pdf", file_data: fileDataUrl };
+    });
+    const extraText = requireString(extractedText)
+      ? `\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 6000, [
+          "Complete Urinogram",
+          "Urinogram",
+          "Microscopic Examination",
+          "Chemical Examination",
+          "Urinary Protein",
+          "Urinary Glucose"
+        ])}`
+      : "";
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      text: { format: { type: "json_object" } },
+      input: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        {
+          role: "user",
+          content: [...fileParts, { type: "input_text", text: `${userPrompt}${extraText}` }]
+        }
+      ]
+    });
+    content = getTextFromResponsesOutput(response);
+  }
+
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeUrinogramIncomingTests(parsedJson);
 }
 
 gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, res) => {
@@ -981,25 +1420,37 @@ gptRouter.post(
     const uploaded = collectUploadedFiles(req);
 
     const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
+    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter(
+      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
+    );
     if (unsupportedFiles.length > 0) {
       return res.status(400).json({
-        error: "Only PDF files are allowed."
+        error: "Only PDF, DOCX, and image files are allowed."
       });
     }
-    if (pdfFiles.length === 0) {
-      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
+      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
     }
 
-    const extractedText = await extractPdfTextForPrompt(pdfFiles);
+    const pdfText = await extractPdfTextForPrompt(pdfFiles);
+    const docxText = await extractDocxTextForPrompt(docxFiles);
+    const extractedText = `${pdfText}${docxText}`;
 
     const gptConcurrency = parseMaybeNumber(process.env.GPT_CONCURRENCY) ?? 2;
 
-    const heartPromise = extractTestsFromPdfs({
+    const heartPromise = extractHeartRelatedTestsFromPdfs({
       openai,
       pdfFiles,
-      extractedText,
-      testNames: HEART_ALL_TESTS
+      extractedText
+    });
+
+    const urinePromise = extractUrinogramTestsFromPdfs({
+      openai,
+      pdfFiles,
+      imageFiles,
+      extractedText
     });
 
     const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
@@ -1013,13 +1464,17 @@ gptRouter.post(
     });
 
     const heartIncomingTests = await heartPromise;
+    const urineIncomingTests = await urinePromise;
     const mergedParameterTests = chunkResults.reduce(
       (acc, incoming) => mergeTestEntries(acc, incoming),
       []
     );
 
-    const heart = buildPresentedCategory(HEART_ALL_TESTS, { tests: heartIncomingTests });
-    const urine = buildPresentedCategory(URINE_PARAMETER_TESTS, { tests: mergedParameterTests });
+    const heartTests = Array.isArray(heartIncomingTests) ? heartIncomingTests : [];
+    const heart = { data: heartTests.length > 0, tests: heartTests };
+    const urineTests = buildCompleteUrinogramTests(urineIncomingTests);
+    const urineHasAny = urineTests.some((t) => t?.status !== "Not included in the PDF");
+    const urine = { data: urineHasAny, tests: urineTests };
     const blood = buildPresentedCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
     const other = buildPresentedCategory(OTHER_PARAMETER_TESTS, { tests: mergedParameterTests });
 
@@ -1056,14 +1511,14 @@ gptRouter.post(
     }
 
     const extractedText = await extractPdfTextForPrompt(pdfFiles);
-    const incoming = await extractTestsFromPdfs({
+    const incoming = await extractHeartRelatedTestsFromPdfs({
       openai,
       pdfFiles,
-      extractedText,
-      testNames: HEART_ALL_TESTS
+      extractedText
     });
 
-    const heart = buildPresentedCategory(HEART_ALL_TESTS, { tests: incoming });
+    const heartTests = Array.isArray(incoming) ? incoming : [];
+    const heart = { data: heartTests.length > 0, tests: heartTests };
     res.json({ heart });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -1086,29 +1541,34 @@ gptRouter.post(
 
     const uploaded = collectUploadedFiles(req);
     const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
+    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter(
+      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
+    );
     if (unsupportedFiles.length > 0) {
       return res.status(400).json({
-        error: "Only PDF files are allowed."
+        error: "Only PDF, DOCX, and image files are allowed."
       });
     }
-    if (pdfFiles.length === 0) {
-      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
+      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
     }
 
-    const { chunkIndex, chunkSize } = getChunkParams(req);
-    const { safeIndex, totalChunks, chunk } = sliceChunk(URINE_PARAMETER_TESTS, chunkIndex, chunkSize);
-
-    const extractedText = await extractPdfTextForPrompt(pdfFiles);
-    const incoming = await extractTestsFromPdfs({
+    const pdfText = await extractPdfTextForPrompt(pdfFiles);
+    const docxText = await extractDocxTextForPrompt(docxFiles);
+    const extractedText = `${pdfText}${docxText}`;
+    const incoming = await extractUrinogramTestsFromPdfs({
       openai,
       pdfFiles,
-      extractedText,
-      testNames: chunk
+      imageFiles,
+      extractedText
     });
 
-    const urine = buildPresentedCategory(chunk, { tests: incoming });
-    res.json({ urine, chunkIndex: safeIndex, totalChunks, chunkSize });
+    const tests = buildCompleteUrinogramTests(incoming);
+    const hasAny = tests.some((t) => t?.status !== "Not included in the PDF");
+    const urine = { data: hasAny, tests };
+    res.json({ urine, chunkIndex: 0, totalChunks: 1, chunkSize: tests.length });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
