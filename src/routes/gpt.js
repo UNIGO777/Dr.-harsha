@@ -80,6 +80,51 @@ function isDocxMime(mime) {
   return mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 }
 
+function collectUploadedFiles(req) {
+  const uploaded = [];
+  if (Array.isArray(req?.files)) uploaded.push(...req.files);
+  else if (req?.files && typeof req.files === "object") {
+    for (const arr of Object.values(req.files)) {
+      if (Array.isArray(arr)) uploaded.push(...arr);
+    }
+  }
+  if (req?.file) uploaded.push(req.file);
+  return uploaded;
+}
+
+async function extractPdfTextForPrompt(pdfFiles) {
+  const maxPdfTextChars = 50000;
+  let extractedText = "";
+  for (const f of pdfFiles) {
+    if (extractedText.length >= maxPdfTextChars) break;
+    const parsed = await pdfParse(f.buffer);
+    const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+    const capped = capTextForPrompt(extracted, 4000);
+    if (!capped) continue;
+    const next = `\n\n[PDF: ${f.originalname}]\n${capped}`;
+    extractedText = (extractedText + next).slice(0, maxPdfTextChars);
+  }
+  return extractedText;
+}
+
+function getChunkParams(req) {
+  const chunkIndex = parseMaybeNumber(req?.body?.chunkIndex) ?? 0;
+  const chunkSize = parseMaybeNumber(req?.body?.chunkSize) ?? 150;
+  return {
+    chunkIndex: Math.max(0, Math.trunc(chunkIndex)),
+    chunkSize: Math.max(1, Math.trunc(chunkSize))
+  };
+}
+
+function sliceChunk(list, chunkIndex, chunkSize) {
+  const items = Array.isArray(list) ? list : [];
+  const totalChunks = Math.max(1, Math.ceil(items.length / chunkSize));
+  const safeIndex = Math.min(Math.max(0, chunkIndex), totalChunks - 1);
+  const start = safeIndex * chunkSize;
+  const end = start + chunkSize;
+  return { safeIndex, totalChunks, chunk: items.slice(start, end) };
+}
+
 const MAX_UPLOAD_MB = (() => {
   const raw = process.env.MAX_UPLOAD_MB;
   const n = typeof raw === "string" ? Number(raw) : null;
@@ -814,14 +859,7 @@ gptRouter.post(
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
     }
 
-    const uploaded = [];
-    if (Array.isArray(req.files)) uploaded.push(...req.files);
-    else if (req.files && typeof req.files === "object") {
-      for (const arr of Object.values(req.files)) {
-        if (Array.isArray(arr)) uploaded.push(...arr);
-      }
-    }
-    if (req.file) uploaded.push(req.file);
+    const uploaded = collectUploadedFiles(req);
 
     const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
     const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
@@ -834,17 +872,7 @@ gptRouter.post(
       return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
     }
 
-    const maxPdfTextChars = 50000;
-    let extractedText = "";
-    for (const f of pdfFiles) {
-      if (extractedText.length >= maxPdfTextChars) break;
-      const parsed = await pdfParse(f.buffer);
-      const extracted = typeof parsed?.text === "string" ? parsed.text : "";
-      const capped = capTextForPrompt(extracted, 4000);
-      if (!capped) continue;
-      const next = `\n\n[PDF: ${f.originalname}]\n${capped}`;
-      extractedText = (extractedText + next).slice(0, maxPdfTextChars);
-    }
+    const extractedText = await extractPdfTextForPrompt(pdfFiles);
 
     const gptConcurrency = parseMaybeNumber(process.env.GPT_CONCURRENCY) ?? 2;
 
@@ -876,6 +904,135 @@ gptRouter.post(
     const blood = buildStrictCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
 
     res.json({ heart, urine, blood });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post(
+  "/heart-analysis",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+  try {
+    const openai = getOpenAIClient();
+    if (!openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+
+    const uploaded = collectUploadedFiles(req);
+    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    if (unsupportedFiles.length > 0) {
+      return res.status(400).json({
+        error: "Only PDF files are allowed."
+      });
+    }
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    }
+
+    const extractedText = await extractPdfTextForPrompt(pdfFiles);
+    const incoming = await extractTestsFromPdfs({
+      openai,
+      pdfFiles,
+      extractedText,
+      testNames: HEART_TESTS
+    });
+
+    const heart = buildStrictCategory(HEART_TESTS, { tests: incoming });
+    res.json({ heart });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post(
+  "/urine-analysis",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+  try {
+    const openai = getOpenAIClient();
+    if (!openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+
+    const uploaded = collectUploadedFiles(req);
+    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    if (unsupportedFiles.length > 0) {
+      return res.status(400).json({
+        error: "Only PDF files are allowed."
+      });
+    }
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    }
+
+    const { chunkIndex, chunkSize } = getChunkParams(req);
+    const { safeIndex, totalChunks, chunk } = sliceChunk(URINE_PARAMETER_TESTS, chunkIndex, chunkSize);
+
+    const extractedText = await extractPdfTextForPrompt(pdfFiles);
+    const incoming = await extractTestsFromPdfs({
+      openai,
+      pdfFiles,
+      extractedText,
+      testNames: chunk
+    });
+
+    const urine = buildStrictCategory(chunk, { tests: incoming });
+    res.json({ urine, chunkIndex: safeIndex, totalChunks, chunkSize });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post(
+  "/blood-analysis",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+  try {
+    const openai = getOpenAIClient();
+    if (!openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+
+    const uploaded = collectUploadedFiles(req);
+    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    if (unsupportedFiles.length > 0) {
+      return res.status(400).json({
+        error: "Only PDF files are allowed."
+      });
+    }
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    }
+
+    const { chunkIndex, chunkSize } = getChunkParams(req);
+    const { safeIndex, totalChunks, chunk } = sliceChunk(BLOOD_PARAMETER_TESTS, chunkIndex, chunkSize);
+
+    const extractedText = await extractPdfTextForPrompt(pdfFiles);
+    const incoming = await extractTestsFromPdfs({
+      openai,
+      pdfFiles,
+      extractedText,
+      testNames: chunk
+    });
+
+    const blood = buildStrictCategory(chunk, { tests: incoming });
+    res.json({ blood, chunkIndex: safeIndex, totalChunks, chunkSize });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
