@@ -4,6 +4,10 @@ import OpenAI from "openai";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -83,17 +87,19 @@ const MAX_UPLOAD_MB = (() => {
   return Math.min(Math.round(n), 50);
 })();
 
+const MAX_ANALYSIS_FILES = 15;
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: MAX_UPLOAD_MB * 1024 * 1024,
-    files: 6
+    files: MAX_ANALYSIS_FILES
   }
 });
 
 export const gptRouter = express.Router();
 
-gptRouter.post("/gpt", upload.array("files", 6), async (req, res) => {
+gptRouter.post("/gpt", upload.array("files", MAX_ANALYSIS_FILES), async (req, res) => {
   try {
     const openai = getOpenAIClient();
     if (!openai) {
@@ -276,12 +282,109 @@ const URINE_TESTS = [
   "Urine Albumin/Creatinine Ratio (UA/C)"
 ];
 
-const ALLOWED_STATUSES = new Set(["LOW", "HIGH", "NORMAL", "NOT_FOUND"]);
-
 function canonicalizeTestName(name) {
   if (!requireString(name)) return "";
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
+
+function uniqueTestNames(list) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const s = typeof raw === "string" ? raw.trim() : "";
+    if (!s) continue;
+    const key = canonicalizeTestName(s);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
+function parseParametersFile(raw) {
+  if (!requireString(raw)) return [];
+  const lines = String(raw)
+    .split(/\r?\n/g)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  const out = [];
+  for (const line of lines.slice(1)) {
+    const parts = line.split("\t");
+    const name = typeof parts?.[2] === "string" ? parts[2].trim() : "";
+    if (!name) continue;
+    out.push(name);
+  }
+  return uniqueTestNames(out);
+}
+
+const PARAMETERS_JSON_PATH = (() => {
+  const raw = process.env.PARAMETERS_JSON_PATH;
+  if (requireString(raw)) return path.resolve(raw.trim());
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(here, "../data/perameters.json");
+})();
+
+const requireModule = createRequire(import.meta.url);
+
+const PARAMETERS_FILE_PATH = (() => {
+  const raw = process.env.PARAMETERS_FILE_PATH;
+  if (requireString(raw)) return path.resolve(raw.trim());
+  return PARAMETERS_JSON_PATH;
+})();
+
+const PARAMETER_TESTS = (() => {
+  try {
+    const parsed = requireModule(PARAMETERS_JSON_PATH);
+    const tests = Array.isArray(parsed?.tests) ? parsed.tests : null;
+    if (tests) return uniqueTestNames(tests);
+  } catch {}
+
+  try {
+    const raw = fs.readFileSync(PARAMETERS_FILE_PATH, "utf8");
+    const maybeJson = safeParseJsonObject(raw);
+    const tests = Array.isArray(maybeJson?.tests) ? maybeJson.tests : null;
+    if (tests) return uniqueTestNames(tests);
+    return parseParametersFile(raw);
+  } catch {
+    return [];
+  }
+})();
+
+const URINE_PARAMETER_TESTS = (() => {
+  const list = PARAMETER_TESTS.filter((name) => {
+    const u = String(name).toUpperCase();
+    return u.includes("URINE") || u.includes("URINARY");
+  });
+  return uniqueTestNames(list);
+})();
+
+const BLOOD_PARAMETER_TESTS = (() => {
+  const urineCanon = new Set(URINE_PARAMETER_TESTS.map(canonicalizeTestName));
+  const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
+  const list = [];
+  for (const name of PARAMETER_TESTS) {
+    const key = canonicalizeTestName(name);
+    if (!key) continue;
+    if (urineCanon.has(key)) continue;
+    if (heartCanon.has(key)) continue;
+    list.push(name);
+  }
+  return uniqueTestNames(list);
+})();
+
+const PARAMETER_TESTS_FOR_EXTRACTION = (() => {
+  const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
+  const list = [];
+  for (const name of PARAMETER_TESTS) {
+    const key = canonicalizeTestName(name);
+    if (!key) continue;
+    if (heartCanon.has(key)) continue;
+    list.push(name);
+  }
+  return uniqueTestNames(list);
+})();
+
+const ALLOWED_STATUSES = new Set(["LOW", "HIGH", "NORMAL", "NOT_PRESENTED", "NOT_FOUND"]);
 
 function toNullOrString(value) {
   if (value == null) return null;
@@ -329,7 +432,10 @@ function parseRangeBounds(referenceRange) {
 
 function computeStatus({ value, referenceRange, fallbackStatus }) {
   const vText = toNullOrString(value);
-  if (vText == null) return "NOT_FOUND";
+  if (vText == null) {
+    const s = requireString(fallbackStatus) ? String(fallbackStatus).toUpperCase() : "";
+    return ALLOWED_STATUSES.has(s) ? s : "NOT_PRESENTED";
+  }
 
   const valueNum = pickFirstNumber(vText);
   const bounds = parseRangeBounds(toNullOrString(referenceRange));
@@ -371,17 +477,167 @@ function buildStrictCategory(list, incoming) {
     const unit = toNullOrString(entry?.unit);
     const referenceRange = toNullOrString(entry?.referenceRange);
     const status = computeStatus({ value, referenceRange, fallbackStatus: entry?.status });
+    const missing = status === "NOT_PRESENTED" || status === "NOT_FOUND";
     return {
       testName,
-      value: status === "NOT_FOUND" ? null : value,
-      unit: status === "NOT_FOUND" ? null : unit,
-      referenceRange: status === "NOT_FOUND" ? null : referenceRange,
+      value: missing ? null : value,
+      unit: missing ? null : unit,
+      referenceRange: missing ? null : referenceRange,
       status
     };
   });
 
-  const data = tests.some((t) => t.status !== "NOT_FOUND");
+  const data = tests.some((t) => t.status !== "NOT_PRESENTED" && t.status !== "NOT_FOUND");
   return { data, tests };
+}
+
+function capTextForPrompt(text, maxChars) {
+  const trimmed = typeof text === "string" ? text.trim() : "";
+  if (!trimmed) return "";
+  if (trimmed.length <= maxChars) return trimmed;
+  const headChars = Math.floor(maxChars * 0.65);
+  const tailChars = maxChars - headChars;
+  const head = trimmed.slice(0, headChars);
+  const tail = trimmed.slice(trimmed.length - tailChars);
+  return `${head}\n...\n${tail}`;
+}
+
+function bulletList(list) {
+  return list.map((t) => `- ${t}`).join("\n");
+}
+
+function chunkArray(list, size) {
+  const out = [];
+  const n = Array.isArray(list) ? list.length : 0;
+  if (!Number.isFinite(size) || size <= 0) return out;
+  for (let i = 0; i < n; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+function normalizeIncomingTests(incoming) {
+  const tests = Array.isArray(incoming?.tests) ? incoming.tests : [];
+  return tests
+    .map((t) => {
+      const testName = toNullOrString(t?.testName);
+      if (!testName) return null;
+      return {
+        testName,
+        value: toNullOrString(t?.value),
+        unit: toNullOrString(t?.unit),
+        referenceRange: toNullOrString(t?.referenceRange),
+        status: toNullOrString(t?.status)
+      };
+    })
+    .filter(Boolean);
+}
+
+function mergeTestEntries(existing, incoming) {
+  const map = new Map();
+  for (const t of existing) {
+    const key = canonicalizeTestName(t?.testName);
+    if (!key) continue;
+    map.set(key, t);
+  }
+
+  for (const t of incoming) {
+    const key = canonicalizeTestName(t?.testName);
+    if (!key) continue;
+    const prev = map.get(key);
+    if (!prev) {
+      map.set(key, t);
+      continue;
+    }
+    const prevHasValue = toNullOrString(prev?.value) != null;
+    const nextHasValue = toNullOrString(t?.value) != null;
+    if (!prevHasValue && nextHasValue) map.set(key, t);
+  }
+
+  return Array.from(map.values());
+}
+
+async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+You must strictly extract test data from medical PDF(s).
+You must follow the provided test list exactly.
+You must not skip any test.
+You must not invent data.
+You must not explain anything.
+You must return JSON only.
+You must extract the exact value text from the PDF(s). Do not modify the value.
+
+If a test from the list is not present in the PDF(s), mark:
+"value": null
+"unit": null
+"referenceRange": null
+"status": "NOT_PRESENTED"`;
+
+  const userPrompt = `Extract test data from the uploaded medical PDF(s).
+
+You MUST search ONLY for the following tests:
+
+TEST LIST:
+${bulletList(testNames)}
+
+For EACH test return:
+- testName
+- value
+- unit
+- referenceRange
+- status
+
+Status Rules:
+- If value < range \u2192 LOW
+- If value > range \u2192 HIGH
+- If within range \u2192 NORMAL
+- If test not present \u2192 NOT_PRESENTED
+
+Return JSON ONLY with this format:
+{
+  "tests": [
+    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
+  ]
+}
+
+Do not add extra keys.
+Do not add text.
+Return JSON only.`;
+
+  let content = "";
+  if (requireString(extractedText)) {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  } else {
+    const fileParts = pdfFiles.map((f) => {
+      const base64 = f.buffer.toString("base64");
+      const fileDataUrl = `data:application/pdf;base64,${base64}`;
+      return { type: "input_file", filename: f.originalname || "report.pdf", file_data: fileDataUrl };
+    });
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      text: { format: { type: "json_object" } },
+      input: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        {
+          role: "user",
+          content: [...fileParts, { type: "input_text", text: userPrompt }]
+        }
+      ]
+    });
+    content = getTextFromResponsesOutput(response);
+  }
+
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeIncomingTests(parsedJson);
 }
 
 gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, res) => {
@@ -525,175 +781,75 @@ gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, 
   }
 });
 
-gptRouter.post("/heart-urine-analysis", upload.single("file"), async (req, res) => {
+gptRouter.post(
+  "/heart-urine-analysis",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
   try {
     const openai = getOpenAIClient();
     if (!openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
     }
 
-    const file = req.file;
-    if (!file || !isPdfMime(file.mimetype)) {
-      return res.status(400).json({ error: "Upload a single PDF as field name 'file'." });
+    const uploaded = [];
+    if (Array.isArray(req.files)) uploaded.push(...req.files);
+    else if (req.files && typeof req.files === "object") {
+      for (const arr of Object.values(req.files)) {
+        if (Array.isArray(arr)) uploaded.push(...arr);
+      }
+    }
+    if (req.file) uploaded.push(req.file);
+
+    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    if (unsupportedFiles.length > 0) {
+      return res.status(400).json({
+        error: "Only PDF files are allowed."
+      });
+    }
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
     }
 
-    const systemPrompt = `You are a medical report extraction engine.
-
-You must strictly extract test data from a medical PDF.
-You must follow the provided test list exactly.
-You must not skip any test.
-You must not invent data.
-You must not explain anything.
-You must return JSON only.
-
-If a test from the list is not present in the PDF, mark:
-"value": null
-"unit": null
-"referenceRange": null
-"status": "NOT_FOUND"`;
-
-    const userPrompt = `Extract HEART and URINE test data from the uploaded medical PDF.
-
-You MUST search ONLY for the following tests.
-
-HEART TEST LIST:
-- High Sensitivity C-Reactive Protein (HS-CRP)
-- Total Cholesterol
-- HDL Cholesterol
-- LDL Cholesterol
-- Triglycerides
-- VLDL Cholesterol
-- Non-HDL Cholesterol
-- TC / HDL Ratio
-- Triglyceride / HDL Ratio
-- LDL / HDL Ratio
-- HDL / LDL Ratio
-- Lipoprotein (a) [Lp(a)]
-- Apolipoprotein A1 (Apo-A1)
-- Apolipoprotein B (Apo-B)
-- Apo B / Apo A1 Ratio
-
-URINE TEST LIST:
-- Volume
-- Colour
-- Appearance
-- Specific Gravity
-- pH
-- Urinary Protein
-- Urinary Glucose
-- Urine Ketone
-- Urinary Bilirubin
-- Urobilinogen
-- Bile Salt
-- Bile Pigment
-- Urine Blood
-- Nitrite
-- Leucocyte Esterase
-- Mucus
-- Red Blood Cells (RBC)
-- Urinary Leucocytes (Pus Cells)
-- Epithelial Cells
-- Casts
-- Crystals
-- Bacteria
-- Yeast
-- Parasite
-- Urinary Microalbumin
-- Urine Creatinine
-- Urine Albumin/Creatinine Ratio (UA/C)
-
-For EACH test return:
-- testName
-- value
-- unit
-- referenceRange
-- status
-
-Status Rules:
-- If value < range \u2192 LOW
-- If value > range \u2192 HIGH
-- If within range \u2192 NORMAL
-- If test not present \u2192 NOT_FOUND
-
-CATEGORY RULE:
-- If ALL heart tests are NOT_FOUND \u2192 heart.data = false
-- If ALL urine tests are NOT_FOUND \u2192 urine.data = false
-- Else \u2192 data = true
-
-FINAL JSON FORMAT ONLY:
-
-{
-  "heart": {
-    "data": true | false,
-    "tests": [
-      {
-        "testName": "",
-        "value": "",
-        "unit": "",
-        "referenceRange": "",
-        "status": ""
-      }
-    ]
-  },
-  "urine": {
-    "data": true | false,
-    "tests": [
-      {
-        "testName": "",
-        "value": "",
-        "unit": "",
-        "referenceRange": "",
-        "status": ""
-      }
-    ]
-  }
-}
-
-Do not add extra keys.
-Do not add text.
-Return JSON only.`;
-
-    const parsed = await pdfParse(file.buffer);
-    const extractedText = typeof parsed?.text === "string" ? parsed.text.trim() : "";
-
-    let content = "";
-    if (extractedText) {
-      const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
-          { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
-        ]
-      });
-      content = completion.choices?.[0]?.message?.content ?? "";
-    } else {
-      const base64 = file.buffer.toString("base64");
-      const fileDataUrl = `data:application/pdf;base64,${base64}`;
-      const response = await openai.responses.create({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        temperature: 0,
-        text: { format: { type: "json_object" } },
-        input: [
-          { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
-          {
-            role: "user",
-            content: [
-              { type: "input_file", filename: file.originalname || "report.pdf", file_data: fileDataUrl },
-              { type: "input_text", text: userPrompt }
-            ]
-          }
-        ]
-      });
-      content = getTextFromResponsesOutput(response);
+    const maxPdfTextChars = 50000;
+    let extractedText = "";
+    for (const f of pdfFiles) {
+      if (extractedText.length >= maxPdfTextChars) break;
+      const parsed = await pdfParse(f.buffer);
+      const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+      const capped = capTextForPrompt(extracted, 4000);
+      if (!capped) continue;
+      const next = `\n\n[PDF: ${f.originalname}]\n${capped}`;
+      extractedText = (extractedText + next).slice(0, maxPdfTextChars);
     }
 
-    const parsedJson = safeParseJsonObject(content) ?? {};
-    const heart = buildStrictCategory(HEART_TESTS, parsedJson.heart);
-    const urine = buildStrictCategory(URINE_TESTS, parsedJson.urine);
+    const heartIncomingTests = await extractTestsFromPdfs({
+      openai,
+      pdfFiles,
+      extractedText,
+      testNames: HEART_TESTS
+    });
 
-    res.json({ heart, urine });
+    const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
+    let mergedParameterTests = [];
+    for (const chunk of chunks) {
+      const incoming = await extractTestsFromPdfs({
+        openai,
+        pdfFiles,
+        extractedText,
+        testNames: chunk
+      });
+      mergedParameterTests = mergeTestEntries(mergedParameterTests, incoming);
+    }
+
+    const heart = buildStrictCategory(HEART_TESTS, { tests: heartIncomingTests });
+    const urine = buildStrictCategory(URINE_PARAMETER_TESTS, { tests: mergedParameterTests });
+    const blood = buildStrictCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
+
+    res.json({ heart, urine, blood });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
