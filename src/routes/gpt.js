@@ -395,6 +395,50 @@ const PARAMETER_TESTS = (() => {
   }
 })();
 
+function isHeartParameterTestName(name) {
+  const u = String(name || "").toUpperCase();
+  if (!u) return false;
+
+  const keywords = [
+    "CHOLESTEROL",
+    "TRIGLYCER",
+    "HDL",
+    "LDL",
+    "VLDL",
+    "NON-HDL",
+    "NON HDL",
+    "APOLIPOPROTEIN",
+    "APO-",
+    "APO ",
+    "LIPOPROTEIN",
+    "LP(A)",
+    "LP-PLA2",
+    "HS-CRP",
+    "HS CRP",
+    "CRP",
+    "HOMOCYSTEINE",
+    "TROPONIN",
+    "NT-PROBNP",
+    "NT PROBNP",
+    "BNP",
+    "CK-MB",
+    "CK MB",
+    "CKMB",
+    "CREATINE KINASE",
+    "D-DIMER",
+    "D DIMER"
+  ];
+
+  return keywords.some((k) => u.includes(k));
+}
+
+const HEART_PARAMETER_TESTS = (() => {
+  const list = PARAMETER_TESTS.filter(isHeartParameterTestName);
+  return uniqueTestNames(list);
+})();
+
+const HEART_ALL_TESTS = uniqueTestNames([...HEART_TESTS, ...HEART_PARAMETER_TESTS]);
+
 const URINE_PARAMETER_TESTS = (() => {
   const list = PARAMETER_TESTS.filter((name) => {
     const u = String(name).toUpperCase();
@@ -458,7 +502,7 @@ function isOtherParameterTestName(name) {
 
 const OTHER_PARAMETER_TESTS = (() => {
   const urineCanon = new Set(URINE_PARAMETER_TESTS.map(canonicalizeTestName));
-  const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
+  const heartCanon = new Set(HEART_ALL_TESTS.map(canonicalizeTestName));
   const list = [];
   for (const name of PARAMETER_TESTS) {
     const key = canonicalizeTestName(name);
@@ -473,7 +517,7 @@ const OTHER_PARAMETER_TESTS = (() => {
 
 const BLOOD_PARAMETER_TESTS = (() => {
   const urineCanon = new Set(URINE_PARAMETER_TESTS.map(canonicalizeTestName));
-  const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
+  const heartCanon = new Set(HEART_ALL_TESTS.map(canonicalizeTestName));
   const otherCanon = new Set(OTHER_PARAMETER_TESTS.map(canonicalizeTestName));
   const list = [];
   for (const name of PARAMETER_TESTS) {
@@ -488,7 +532,7 @@ const BLOOD_PARAMETER_TESTS = (() => {
 })();
 
 const PARAMETER_TESTS_FOR_EXTRACTION = (() => {
-  const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
+  const heartCanon = new Set(HEART_ALL_TESTS.map(canonicalizeTestName));
   const list = [];
   for (const name of PARAMETER_TESTS) {
     const key = canonicalizeTestName(name);
@@ -955,7 +999,7 @@ gptRouter.post(
       openai,
       pdfFiles,
       extractedText,
-      testNames: HEART_TESTS
+      testNames: HEART_ALL_TESTS
     });
 
     const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
@@ -974,7 +1018,7 @@ gptRouter.post(
       []
     );
 
-    const heart = buildPresentedCategory(HEART_TESTS, { tests: heartIncomingTests });
+    const heart = buildPresentedCategory(HEART_ALL_TESTS, { tests: heartIncomingTests });
     const urine = buildPresentedCategory(URINE_PARAMETER_TESTS, { tests: mergedParameterTests });
     const blood = buildPresentedCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
     const other = buildPresentedCategory(OTHER_PARAMETER_TESTS, { tests: mergedParameterTests });
@@ -1016,10 +1060,10 @@ gptRouter.post(
       openai,
       pdfFiles,
       extractedText,
-      testNames: HEART_TESTS
+      testNames: HEART_ALL_TESTS
     });
 
-    const heart = buildPresentedCategory(HEART_TESTS, { tests: incoming });
+    const heart = buildPresentedCategory(HEART_ALL_TESTS, { tests: incoming });
     res.json({ heart });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
