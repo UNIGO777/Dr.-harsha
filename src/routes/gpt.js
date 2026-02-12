@@ -403,7 +403,60 @@ const URINE_PARAMETER_TESTS = (() => {
   return uniqueTestNames(list);
 })();
 
-const BLOOD_PARAMETER_TESTS = (() => {
+function isOtherParameterTestName(name) {
+  const u = String(name || "").toUpperCase();
+  if (!u) return false;
+
+  const keywords = [
+    "STOOL",
+    "SPUTUM",
+    "SEMEN",
+    "SWAB",
+    "VAGINAL",
+    "CERVICAL",
+    "URETHRAL",
+    "THROAT",
+    "NASAL",
+    "SALIVA",
+    "CSF",
+    "CEREBROSPINAL",
+    "SYNOVIAL",
+    "PLEURAL",
+    "ASCITIC",
+    "PERITONEAL",
+    "PERICARDIAL",
+    "AMNIOTIC",
+    "TISSUE",
+    "BIOPSY",
+    "SMEAR",
+    "PAP",
+    "KOH",
+    "HANGING DROP",
+    "MICROSCOPY",
+    "CULTURE",
+    "PCR",
+    "ALCOHOL",
+    "OPIATE",
+    "OPIATES",
+    "CANNAB",
+    "TETRAHYDROCANNABINOL",
+    "BENZODIAZEP",
+    "BARBITUR",
+    "METHAMPHET",
+    "AMPHET",
+    "MDMA",
+    "COCAINE",
+    "MORPHINE",
+    "METHADONE",
+    "KETAMINE",
+    "PHENCYCLIDINE",
+    "NICOTINE"
+  ];
+
+  return keywords.some((k) => u.includes(k));
+}
+
+const OTHER_PARAMETER_TESTS = (() => {
   const urineCanon = new Set(URINE_PARAMETER_TESTS.map(canonicalizeTestName));
   const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
   const list = [];
@@ -412,6 +465,23 @@ const BLOOD_PARAMETER_TESTS = (() => {
     if (!key) continue;
     if (urineCanon.has(key)) continue;
     if (heartCanon.has(key)) continue;
+    if (!isOtherParameterTestName(name)) continue;
+    list.push(name);
+  }
+  return uniqueTestNames(list);
+})();
+
+const BLOOD_PARAMETER_TESTS = (() => {
+  const urineCanon = new Set(URINE_PARAMETER_TESTS.map(canonicalizeTestName));
+  const heartCanon = new Set(HEART_TESTS.map(canonicalizeTestName));
+  const otherCanon = new Set(OTHER_PARAMETER_TESTS.map(canonicalizeTestName));
+  const list = [];
+  for (const name of PARAMETER_TESTS) {
+    const key = canonicalizeTestName(name);
+    if (!key) continue;
+    if (urineCanon.has(key)) continue;
+    if (heartCanon.has(key)) continue;
+    if (otherCanon.has(key)) continue;
     list.push(name);
   }
   return uniqueTestNames(list);
@@ -536,6 +606,14 @@ function buildStrictCategory(list, incoming) {
   return { data, tests };
 }
 
+function buildPresentedCategory(list, incoming) {
+  const category = buildStrictCategory(list, incoming);
+  const tests = (category?.tests ?? []).filter(
+    (t) => t?.status !== "NOT_PRESENTED" && t?.status !== "NOT_FOUND"
+  );
+  return { data: tests.length > 0, tests };
+}
+
 function capTextForPrompt(text, maxChars) {
   const trimmed = typeof text === "string" ? text.trim() : "";
   if (!trimmed) return "";
@@ -625,17 +703,12 @@ async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames
 
 You must strictly extract test data from medical PDF(s).
 You must follow the provided test list exactly.
-You must not skip any test.
 You must not invent data.
 You must not explain anything.
 You must return JSON only.
 You must extract the exact value text from the PDF(s). Do not modify the value.
-
-If a test from the list is not present in the PDF(s), mark:
-"value": null
-"unit": null
-"referenceRange": null
-"status": "NOT_PRESENTED"`;
+Only include tests that are present in the PDF(s).
+Do NOT include tests that are not present.`;
 
   const userPrompt = `Extract test data from the uploaded medical PDF(s).
 
@@ -644,7 +717,9 @@ You MUST search ONLY for the following tests:
 TEST LIST:
 ${bulletList(testNames)}
 
-For EACH test return:
+Return only the tests that are present in the PDF(s).
+
+For EACH returned test return:
 - testName
 - value
 - unit
@@ -655,7 +730,7 @@ Status Rules:
 - If value < range \u2192 LOW
 - If value > range \u2192 HIGH
 - If within range \u2192 NORMAL
-- If test not present \u2192 NOT_PRESENTED
+- Do NOT return tests that are not present
 
 Return JSON ONLY with this format:
 {
@@ -899,11 +974,12 @@ gptRouter.post(
       []
     );
 
-    const heart = buildStrictCategory(HEART_TESTS, { tests: heartIncomingTests });
-    const urine = buildStrictCategory(URINE_PARAMETER_TESTS, { tests: mergedParameterTests });
-    const blood = buildStrictCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
+    const heart = buildPresentedCategory(HEART_TESTS, { tests: heartIncomingTests });
+    const urine = buildPresentedCategory(URINE_PARAMETER_TESTS, { tests: mergedParameterTests });
+    const blood = buildPresentedCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
+    const other = buildPresentedCategory(OTHER_PARAMETER_TESTS, { tests: mergedParameterTests });
 
-    res.json({ heart, urine, blood });
+    res.json({ heart, urine, blood, other });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
@@ -943,7 +1019,7 @@ gptRouter.post(
       testNames: HEART_TESTS
     });
 
-    const heart = buildStrictCategory(HEART_TESTS, { tests: incoming });
+    const heart = buildPresentedCategory(HEART_TESTS, { tests: incoming });
     res.json({ heart });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -987,7 +1063,7 @@ gptRouter.post(
       testNames: chunk
     });
 
-    const urine = buildStrictCategory(chunk, { tests: incoming });
+    const urine = buildPresentedCategory(chunk, { tests: incoming });
     res.json({ urine, chunkIndex: safeIndex, totalChunks, chunkSize });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -1031,8 +1107,52 @@ gptRouter.post(
       testNames: chunk
     });
 
-    const blood = buildStrictCategory(chunk, { tests: incoming });
+    const blood = buildPresentedCategory(chunk, { tests: incoming });
     res.json({ blood, chunkIndex: safeIndex, totalChunks, chunkSize });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post(
+  "/other-analysis",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+  try {
+    const openai = getOpenAIClient();
+    if (!openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+
+    const uploaded = collectUploadedFiles(req);
+    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    if (unsupportedFiles.length > 0) {
+      return res.status(400).json({
+        error: "Only PDF files are allowed."
+      });
+    }
+    if (pdfFiles.length === 0) {
+      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    }
+
+    const { chunkIndex, chunkSize } = getChunkParams(req);
+    const { safeIndex, totalChunks, chunk } = sliceChunk(OTHER_PARAMETER_TESTS, chunkIndex, chunkSize);
+
+    const extractedText = await extractPdfTextForPrompt(pdfFiles);
+    const incoming = await extractTestsFromPdfs({
+      openai,
+      pdfFiles,
+      extractedText,
+      testNames: chunk
+    });
+
+    const other = buildPresentedCategory(chunk, { tests: incoming });
+    res.json({ other, chunkIndex: safeIndex, totalChunks, chunkSize });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
