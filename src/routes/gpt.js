@@ -514,6 +514,26 @@ function chunkArray(list, size) {
   return out;
 }
 
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const list = Array.isArray(items) ? items : [];
+  const limit =
+    Number.isFinite(concurrency) && concurrency > 0 ? Math.floor(concurrency) : 1;
+  const results = new Array(list.length);
+  let nextIndex = 0;
+
+  const workerCount = Math.min(limit, list.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    for (;;) {
+      const i = nextIndex++;
+      if (i >= list.length) break;
+      results[i] = await mapper(list[i], i);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
 function normalizeIncomingTests(incoming) {
   const tests = Array.isArray(incoming?.tests) ? incoming.tests : [];
   return tests
@@ -826,7 +846,9 @@ gptRouter.post(
       extractedText = (extractedText + next).slice(0, maxPdfTextChars);
     }
 
-    const heartIncomingTests = await extractTestsFromPdfs({
+    const gptConcurrency = parseMaybeNumber(process.env.GPT_CONCURRENCY) ?? 2;
+
+    const heartPromise = extractTestsFromPdfs({
       openai,
       pdfFiles,
       extractedText,
@@ -834,16 +856,20 @@ gptRouter.post(
     });
 
     const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
-    let mergedParameterTests = [];
-    for (const chunk of chunks) {
-      const incoming = await extractTestsFromPdfs({
+    const chunkResults = await mapWithConcurrency(chunks, gptConcurrency, async (chunk) => {
+      return extractTestsFromPdfs({
         openai,
         pdfFiles,
         extractedText,
         testNames: chunk
       });
-      mergedParameterTests = mergeTestEntries(mergedParameterTests, incoming);
-    }
+    });
+
+    const heartIncomingTests = await heartPromise;
+    const mergedParameterTests = chunkResults.reduce(
+      (acc, incoming) => mergeTestEntries(acc, incoming),
+      []
+    );
 
     const heart = buildStrictCategory(HEART_TESTS, { tests: heartIncomingTests });
     const urine = buildStrictCategory(URINE_PARAMETER_TESTS, { tests: mergedParameterTests });
