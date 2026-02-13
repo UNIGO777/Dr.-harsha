@@ -154,6 +154,17 @@ function sliceChunk(list, chunkIndex, chunkSize) {
   return { safeIndex, totalChunks, chunk: items.slice(start, end) };
 }
 
+function sliceChunkFixed(list, chunkIndex, maxChunks) {
+  const items = Array.isArray(list) ? list : [];
+  const requested = Number.isFinite(maxChunks) ? Math.max(1, Math.trunc(maxChunks)) : 4;
+  const totalChunks = Math.max(1, Math.min(requested, items.length || 1));
+  const chunkSize = Math.max(1, Math.ceil(items.length / totalChunks));
+  const safeIndex = Math.min(Math.max(0, chunkIndex), totalChunks - 1);
+  const start = safeIndex * chunkSize;
+  const end = start + chunkSize;
+  return { safeIndex, totalChunks, chunkSize, chunk: items.slice(start, end) };
+}
+
 const MAX_UPLOAD_MB = (() => {
   const raw = process.env.MAX_UPLOAD_MB;
   const n = typeof raw === "string" ? Number(raw) : null;
@@ -349,6 +360,70 @@ const HEART_RELATED_EXTRACT_TESTS = [
   "Magnesium",
   "eGFR"
 ];
+
+const BLOOD_ANALYSIS_EXTRACT_TESTS = uniqueTestNames([
+  "Homocysteine",
+  "Hematocrit (PCV)",
+  "RDW-SD",
+  "RDW SD",
+  "Average Blood Glucose (ABG)",
+  "Average Blood Glucose",
+  "Fasting Blood Sugar",
+  "HbA1c",
+  "Testosterone",
+  "HDL/LDL Ratio",
+  "LDL Cholesterol",
+  "Non-HDL Cholesterol",
+  "Non HDL Cholesterol",
+  "Total Cholesterol",
+  "Trig/HDL Ratio",
+  "Triglyceride/HDL Ratio",
+  "Triglycerides",
+  "VLDL Cholesterol",
+  "VLDL",
+  "SGPT (ALT)",
+  "SGPT",
+  "ALT (SGPT)",
+  "Albumin - Serum",
+  "Serum Albumin",
+  "SGOT (AST)",
+  "SGOT",
+  "AST (SGOT)",
+  "GGT",
+  "Alb/Globulin Ratio",
+  "Albumin/Globulin Ratio",
+  "Serum Globulin",
+  "Uric Acid",
+  "25-OH Vitamin D",
+  "25 OH Vitamin D",
+  "Vitamin D (25-OH)",
+  "Vitamin B-12",
+  "Vitamin B12",
+  "Hemoglobin",
+  "Total RBC Count",
+  "MCV",
+  "MCH",
+  "MCHC",
+  "Total Leucocyte Count (WBC)",
+  "Total Leukocyte Count (WBC)",
+  "Platelet Count",
+  "Cystatin C",
+  "eGFR",
+  "Serum Creatinine (Urine)",
+  "Serum Creatinine",
+  "Iron",
+  "Ferritin",
+  "Fructosamine",
+  "Lipoprotein (a)",
+  "Lipoprotein (a) [Lp(a)]",
+  "Serum Zinc",
+  "Amylase",
+  "Urine Microalbumin",
+  "Urine Glucose",
+  "Urine Protein",
+  "Urine Specific Gravity",
+  "Urine pH"
+]);
 
 const URINE_TESTS = [
   "Volume",
@@ -618,6 +693,25 @@ const PARAMETER_TESTS_FOR_EXTRACTION = (() => {
     const key = canonicalizeTestName(name);
     if (!key) continue;
     if (heartCanon.has(key)) continue;
+    list.push(name);
+  }
+  return uniqueTestNames(list);
+})();
+
+const OTHER_ANALYSIS_EXTRACT_TESTS = (() => {
+  const excluded = uniqueTestNames([
+    ...(Array.isArray(BLOOD_ANALYSIS_EXTRACT_TESTS) ? BLOOD_ANALYSIS_EXTRACT_TESTS : []),
+    ...(Array.isArray(HEART_RELATED_EXTRACT_TESTS) ? HEART_RELATED_EXTRACT_TESTS : []),
+    ...(Array.isArray(HEART_TESTS) ? HEART_TESTS : []),
+    ...(Array.isArray(URINOGRAM_EXTRACT_TESTS) ? URINOGRAM_EXTRACT_TESTS : []),
+    ...(Array.isArray(URINE_TESTS) ? URINE_TESTS : [])
+  ]);
+  const excludedCanon = new Set(excluded.map(canonicalizeTestName));
+  const list = [];
+  for (const name of PARAMETER_TESTS) {
+    const key = canonicalizeTestName(name);
+    if (!key) continue;
+    if (excludedCanon.has(key)) continue;
     list.push(name);
   }
   return uniqueTestNames(list);
@@ -939,6 +1033,72 @@ Return JSON only.`;
     content = getTextFromResponsesOutput(response);
   }
 
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeIncomingTests(parsedJson);
+}
+
+async function extractTestsFromImagesAndText({ openai, imageFiles, extractedText, testNames }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.
+Do not hallucinate.
+Extract values exactly as written in the report.`;
+
+  const userPrompt = `Extract test data from the uploaded medical report images.
+
+You MUST search ONLY for the following tests:
+
+TEST LIST:
+${bulletList(testNames)}
+
+For EACH test return:
+- testName
+- value
+- unit
+- referenceRange
+- status
+
+Status Rules:
+- If value < range → LOW
+- If value > range → HIGH
+- If within range → NORMAL
+- If test not present → NOT_PRESENTED
+
+Return JSON ONLY with this format:
+{
+  "tests": [
+    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
+  ]
+}
+
+Do not add extra keys.
+Do not add text.
+Return JSON only.`;
+
+  const contentParts = [
+    { type: "text", text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(extractedText, 10000)}` }
+  ];
+  const images = Array.isArray(imageFiles) ? imageFiles : [];
+  for (const f of images) {
+    const b64 = f.buffer.toString("base64");
+    const dataUrl = `data:${f.mimetype};base64,${b64}`;
+    contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+  }
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+      { role: "user", content: contentParts }
+    ]
+  });
+
+  const content = completion.choices?.[0]?.message?.content ?? "";
   const parsedJson = safeParseJsonObject(content) ?? {};
   return normalizeIncomingTests(parsedJson);
 }
@@ -1590,29 +1750,58 @@ gptRouter.post(
 
     const uploaded = collectUploadedFiles(req);
     const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
+    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
+    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter(
+      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
+    );
     if (unsupportedFiles.length > 0) {
       return res.status(400).json({
-        error: "Only PDF files are allowed."
+        error: "Only PDF, DOCX, and image files are allowed."
       });
     }
-    if (pdfFiles.length === 0) {
-      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
+    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
+      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
     }
 
-    const { chunkIndex, chunkSize } = getChunkParams(req);
-    const { safeIndex, totalChunks, chunk } = sliceChunk(BLOOD_PARAMETER_TESTS, chunkIndex, chunkSize);
+    const chunk = BLOOD_ANALYSIS_EXTRACT_TESTS;
 
-    const extractedText = await extractPdfTextForPrompt(pdfFiles);
-    const incoming = await extractTestsFromPdfs({
-      openai,
-      pdfFiles,
-      extractedText,
-      testNames: chunk
+    const pdfText = await extractPdfTextForPrompt(pdfFiles);
+    const docxText = await extractDocxTextForPrompt(docxFiles);
+    const extractedText = `${pdfText}${docxText}`;
+
+    const incoming =
+      imageFiles.length > 0
+        ? await extractTestsFromImagesAndText({
+            openai,
+            imageFiles,
+            extractedText,
+            testNames: chunk
+          })
+        : await extractTestsFromPdfs({
+            openai,
+            pdfFiles,
+            extractedText,
+            testNames: chunk
+          });
+
+    const strict = buildStrictCategory(chunk, { tests: incoming });
+    const notIncludedText = "NOT INCLUDED ";
+    const tests = (Array.isArray(strict?.tests) ? strict.tests : []).map((t) => {
+      const status = String(t?.status || "").toUpperCase();
+      const missing = status === "NOT_PRESENTED" || status === "NOT_FOUND";
+      if (!missing) return t;
+      return {
+        ...t,
+        value: notIncludedText,
+        unit: null,
+        referenceRange: null,
+        status: notIncludedText
+      };
     });
 
-    const blood = buildPresentedCategory(chunk, { tests: incoming });
-    res.json({ blood, chunkIndex: safeIndex, totalChunks, chunkSize });
+    const blood = { data: strict?.data === true, tests };
+    res.json({ blood, chunkIndex: 0, totalChunks: 1, chunkSize: tests.length });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
@@ -1644,8 +1833,12 @@ gptRouter.post(
       return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
     }
 
-    const { chunkIndex, chunkSize } = getChunkParams(req);
-    const { safeIndex, totalChunks, chunk } = sliceChunk(OTHER_PARAMETER_TESTS, chunkIndex, chunkSize);
+    const { chunkIndex } = getChunkParams(req);
+    const { safeIndex, totalChunks, chunkSize, chunk } = sliceChunkFixed(
+      OTHER_ANALYSIS_EXTRACT_TESTS,
+      chunkIndex,
+      4
+    );
 
     const extractedText = await extractPdfTextForPrompt(pdfFiles);
     const incoming = await extractTestsFromPdfs({
@@ -1655,7 +1848,22 @@ gptRouter.post(
       testNames: chunk
     });
 
-    const other = buildPresentedCategory(chunk, { tests: incoming });
+    const strict = buildStrictCategory(chunk, { tests: incoming });
+    const notIncludedText = "NOT INCLUDED ";
+    const tests = (Array.isArray(strict?.tests) ? strict.tests : []).map((t) => {
+      const status = String(t?.status || "").toUpperCase();
+      const missing = status === "NOT_PRESENTED" || status === "NOT_FOUND";
+      if (!missing) return t;
+      return {
+        ...t,
+        value: notIncludedText,
+        unit: null,
+        referenceRange: null,
+        status: notIncludedText
+      };
+    });
+
+    const other = { data: strict?.data === true, tests };
     res.json({ other, chunkIndex: safeIndex, totalChunks, chunkSize });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
