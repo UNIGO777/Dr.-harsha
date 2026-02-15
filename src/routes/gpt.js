@@ -114,6 +114,36 @@ async function extractPdfTextForPrompt(pdfFiles) {
   return extractedText;
 }
 
+async function extractPdfTextForBloodPrompt(pdfFiles) {
+  const maxPdfTextChars = 240000;
+  let extractedText = "";
+  for (const f of pdfFiles) {
+    if (extractedText.length >= maxPdfTextChars) break;
+    const parsed = await pdfParse(f.buffer);
+    const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+    const trimmed = extracted.trim();
+    if (!trimmed) continue;
+    const next = `\n\n[PDF: ${f.originalname}]\n${trimmed}`;
+    extractedText = (extractedText + next).slice(0, maxPdfTextChars);
+  }
+  return extractedText;
+}
+
+async function extractDocxTextForBloodPrompt(docxFiles) {
+  const maxDocxTextChars = 240000;
+  let extractedText = "";
+  for (const f of docxFiles) {
+    if (extractedText.length >= maxDocxTextChars) break;
+    const result = await mammoth.extractRawText({ buffer: f.buffer });
+    const extracted = typeof result?.value === "string" ? result.value : "";
+    const trimmed = extracted.trim();
+    if (!trimmed) continue;
+    const next = `\n\n[DOCX: ${f.originalname}]\n${trimmed}`;
+    extractedText = (extractedText + next).slice(0, maxDocxTextChars);
+  }
+  return extractedText;
+}
+
 async function extractDocxTextForPrompt(docxFiles) {
   const maxDocxTextChars = 80000;
   let extractedText = "";
@@ -163,6 +193,17 @@ function sliceChunkFixed(list, chunkIndex, maxChunks) {
   const start = safeIndex * chunkSize;
   const end = start + chunkSize;
   return { safeIndex, totalChunks, chunkSize, chunk: items.slice(start, end) };
+}
+
+function sliceTextFixed(text, chunkIndex, maxChunks) {
+  const s = typeof text === "string" ? text : "";
+  const requested = Number.isFinite(maxChunks) ? Math.max(1, Math.trunc(maxChunks)) : 4;
+  const totalChunks = Math.max(1, Math.min(requested, s.length || 1));
+  const chunkSize = Math.max(1, Math.ceil(s.length / totalChunks));
+  const safeIndex = Math.min(Math.max(0, chunkIndex), totalChunks - 1);
+  const start = safeIndex * chunkSize;
+  const end = start + chunkSize;
+  return { safeIndex, totalChunks, chunkSize, chunkText: s.slice(start, end) };
 }
 
 const MAX_UPLOAD_MB = (() => {
@@ -928,6 +969,25 @@ function normalizeIncomingTests(incoming) {
     .filter(Boolean);
 }
 
+function normalizeLooseIncomingTests(incoming) {
+  const tests = Array.isArray(incoming?.tests) ? incoming.tests : [];
+  return tests
+    .map((t) => {
+      if (!t || typeof t !== "object" || Array.isArray(t)) return null;
+      const testName =
+        toNullOrString(t?.testName) ?? toNullOrString(t?.test_name) ?? toNullOrString(t?.name);
+      if (!testName) return null;
+      const value = toNullOrString(t?.value) ?? toNullOrString(t?.observed_value);
+      const unit = toNullOrString(t?.unit) ?? toNullOrString(t?.units);
+      const referenceRange =
+        toNullOrString(t?.referenceRange) ?? toNullOrString(t?.reference_range) ?? toNullOrString(t?.range);
+      const status = toNullOrString(t?.status);
+      const computed = computeStatus({ value, referenceRange, fallbackStatus: status });
+      return { testName, value, unit, referenceRange, status: computed };
+    })
+    .filter(Boolean);
+}
+
 function mergeTestEntries(existing, incoming) {
   const map = new Map();
   for (const t of existing) {
@@ -1035,6 +1095,114 @@ Return JSON only.`;
 
   const parsedJson = safeParseJsonObject(content) ?? {};
   return normalizeIncomingTests(parsedJson);
+}
+
+async function extractAllBloodParametersFromText({ openai, extractedText }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.
+Do not hallucinate.
+Extract values exactly as written in the report.`;
+
+  const userPrompt = `Extract ALL blood test parameters present in the provided report text.
+
+Only include parameters that are actually present with a value in the text.
+Do not include urine/stool tests.
+
+For EACH parameter return:
+- testName
+- value
+- unit
+- referenceRange
+- status
+
+Status Rules:
+- If referenceRange is available and value is numeric, set status to LOW/HIGH/NORMAL.
+- Otherwise set status to NORMAL.
+
+Return JSON ONLY with this format:
+{
+  "tests": [
+    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
+  ]
+}`;
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+      { role: "user", content: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }
+    ]
+  });
+
+  const content = completion.choices?.[0]?.message?.content ?? "";
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeLooseIncomingTests(parsedJson);
+}
+
+async function extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.
+Do not hallucinate.
+Extract values exactly as written in the report.`;
+
+  const userPrompt = `Extract ALL blood test parameters present in the provided medical report images and text.
+
+Only include parameters that are actually present with a value.
+Do not include urine/stool tests.
+
+For EACH parameter return:
+- testName
+- value
+- unit
+- referenceRange
+- status
+
+Status Rules:
+- If referenceRange is available and value is numeric, set status to LOW/HIGH/NORMAL.
+- Otherwise set status to NORMAL.
+
+Return JSON ONLY with this format:
+{
+  "tests": [
+    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
+  ]
+}`;
+
+  const contentParts = [
+    {
+      type: "text",
+      text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 12000)}`
+    }
+  ];
+  for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+    const b64 = f.buffer.toString("base64");
+    const dataUrl = `data:${f.mimetype};base64,${b64}`;
+    contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+  }
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+      { role: "user", content: contentParts }
+    ]
+  });
+
+  const content = completion.choices?.[0]?.message?.content ?? "";
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeLooseIncomingTests(parsedJson);
 }
 
 async function extractTestsFromImagesAndText({ openai, imageFiles, extractedText, testNames }) {
@@ -1764,44 +1932,28 @@ gptRouter.post(
       return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
     }
 
-    const chunk = BLOOD_ANALYSIS_EXTRACT_TESTS;
+    const { chunkIndex } = getChunkParams(req);
 
-    const pdfText = await extractPdfTextForPrompt(pdfFiles);
-    const docxText = await extractDocxTextForPrompt(docxFiles);
+    const pdfText = await extractPdfTextForBloodPrompt(pdfFiles);
+    const docxText = await extractDocxTextForBloodPrompt(docxFiles);
     const extractedText = `${pdfText}${docxText}`;
+
+    if (!requireString(extractedText)) {
+      const blood = { data: false, tests: [] };
+      return res.json({ blood, chunkIndex: 0, totalChunks: 1, chunkSize: 1, hasMore: false });
+    }
+
+    const { safeIndex, totalChunks, chunkText, chunkSize } = sliceTextFixed(extractedText, chunkIndex, 4);
 
     const incoming =
       imageFiles.length > 0
-        ? await extractTestsFromImagesAndText({
-            openai,
-            imageFiles,
-            extractedText,
-            testNames: chunk
-          })
-        : await extractTestsFromPdfs({
-            openai,
-            pdfFiles,
-            extractedText,
-            testNames: chunk
-          });
+        ? await extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText: chunkText })
+        : await extractAllBloodParametersFromText({ openai, extractedText: chunkText });
 
-    const strict = buildStrictCategory(chunk, { tests: incoming });
-    const notIncludedText = "NOT INCLUDED ";
-    const tests = (Array.isArray(strict?.tests) ? strict.tests : []).map((t) => {
-      const status = String(t?.status || "").toUpperCase();
-      const missing = status === "NOT_PRESENTED" || status === "NOT_FOUND";
-      if (!missing) return t;
-      return {
-        ...t,
-        value: notIncludedText,
-        unit: null,
-        referenceRange: null,
-        status: notIncludedText
-      };
-    });
-
-    const blood = { data: strict?.data === true, tests };
-    res.json({ blood, chunkIndex: 0, totalChunks: 1, chunkSize: tests.length });
+    const merged = mergeTestEntries([], Array.isArray(incoming) ? incoming : []);
+    const hasAny = merged.length > 0;
+    const blood = { data: hasAny, tests: merged };
+    res.json({ blood, chunkIndex: safeIndex, totalChunks, chunkSize, hasMore: safeIndex + 1 < totalChunks });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
