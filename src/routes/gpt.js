@@ -20,6 +20,73 @@ function getOpenAIClient() {
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
+function normalizeAiProvider(value) {
+  const v = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!v) return "openai";
+  if (v.includes("claude") || v.includes("anthropic")) return "claude";
+  if (v.includes("openai") || v.includes("gpt")) return "openai";
+  return "openai";
+}
+
+function getAiProviderFromReq(req) {
+  return normalizeAiProvider(req?.body?.provider ?? req?.query?.provider);
+}
+
+function hasAnthropicKey() {
+  return requireString(process.env.ANTHROPIC_API_KEY);
+}
+
+function getTextFromAnthropicMessageResponse(response) {
+  const content = response?.content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((p) => p && p.type === "text" && typeof p.text === "string")
+    .map((p) => p.text)
+    .join("\n");
+}
+
+function getFetch() {
+  if (typeof fetch === "function") return fetch;
+  throw new Error("Global fetch is not available. Use Node.js v18+.");
+}
+
+async function anthropicCreateJsonMessage({ system, messages, model, temperature, maxTokens }) {
+  if (!hasAnthropicKey()) {
+    throw new Error("ANTHROPIC_API_KEY is not set");
+  }
+
+  const finalModel = requireString(model)
+    ? model
+    : process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022";
+
+  const res = await getFetch()("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": process.env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify({
+      model: finalModel,
+      max_tokens: Number.isFinite(maxTokens) ? Math.max(256, Math.trunc(maxTokens)) : 4096,
+      temperature: Number.isFinite(temperature) ? temperature : 0,
+      system: requireString(system) ? system : undefined,
+      messages: Array.isArray(messages) ? messages : []
+    })
+  });
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg =
+      (typeof data?.error?.message === "string" && data.error.message.trim()) ||
+      (typeof data?.message === "string" && data.message.trim()) ||
+      `Anthropic request failed (${res.status})`;
+    throw new Error(msg);
+  }
+
+  return data;
+}
+
 function parseMaybeJson(value) {
   if (!requireString(value)) return null;
   try {
@@ -63,6 +130,39 @@ function getTextFromResponsesOutput(response) {
   return texts.join("\n");
 }
 
+function extractFirstJsonObjectText(text) {
+  if (!requireString(text)) return null;
+  const s = String(text);
+  const start = s.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i += 1) {
+    const ch = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      if (inString) escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 function isImageMime(mime) {
   return (
     mime === "image/png" ||
@@ -90,6 +190,22 @@ function collectUploadedFiles(req) {
   }
   if (req?.file) uploaded.push(req.file);
   return uploaded;
+}
+
+async function extractPdfTextRawForPrompt(pdfFiles) {
+  const maxPdfTextChars = 80000;
+  let extractedText = "";
+  for (const f of Array.isArray(pdfFiles) ? pdfFiles : []) {
+    if (extractedText.length >= maxPdfTextChars) break;
+    const parsed = await pdfParse(f.buffer);
+    const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+    const trimmed = extracted.trim();
+    if (!trimmed) continue;
+    const capped = trimmed.length > 20000 ? trimmed.slice(0, 20000) : trimmed;
+    const next = `\n\n[PDF: ${f.originalname}]\n${capped}`;
+    extractedText = (extractedText + next).slice(0, maxPdfTextChars);
+  }
+  return extractedText;
 }
 
 async function extractPdfTextForPrompt(pdfFiles) {
@@ -227,9 +343,13 @@ export const gptRouter = express.Router();
 
 gptRouter.post("/gpt", upload.array("files", MAX_ANALYSIS_FILES), async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const { prompt, model, temperature } = req.body ?? {};
@@ -309,6 +429,33 @@ gptRouter.post("/gpt", upload.array("files", MAX_ANALYSIS_FILES), async (req, re
       contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
     }
 
+    if (provider === "claude") {
+      const anthropicContent = [{ type: "text", text: `${baseText}${pdfText}${docxText}` }];
+      for (const f of imageFiles) {
+        anthropicContent.push({
+          type: "image",
+          source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+        });
+      }
+
+      const response = await anthropicCreateJsonMessage({
+        system: null,
+        messages: [{ role: "user", content: anthropicContent }],
+        model: requireString(model) ? model : undefined,
+        temperature: parseMaybeNumber(temperature) ?? 0.2,
+        maxTokens: 4096
+      });
+
+      const content = getTextFromAnthropicMessageResponse(response);
+      res.json({
+        id: response?.id ?? null,
+        model: response?.model ?? (requireString(model) ? model : process.env.ANTHROPIC_MODEL || null),
+        content,
+        usage: response?.usage ?? null
+      });
+      return;
+    }
+
     const finalMessages = [...normalizedMessages];
     if (finalMessages[lastIndex]?.role === "user") {
       finalMessages[lastIndex] = { ...finalMessages[lastIndex], content: contentParts };
@@ -317,9 +464,7 @@ gptRouter.post("/gpt", upload.array("files", MAX_ANALYSIS_FILES), async (req, re
     }
 
     const completion = await openai.chat.completions.create({
-      model: requireString(model)
-        ? model
-        : process.env.OPENAI_MODEL || "gpt-4o-mini",
+      model: requireString(model) ? model : process.env.OPENAI_MODEL || "gpt-4o-mini",
       temperature: parseMaybeNumber(temperature) ?? 0.2,
       messages: finalMessages
     });
@@ -346,6 +491,14 @@ function safeParseJsonObject(text) {
   } catch {
     return null;
   }
+}
+
+function safeParseJsonObjectLoose(text) {
+  const direct = safeParseJsonObject(text);
+  if (direct) return direct;
+  const extracted = extractFirstJsonObjectText(text);
+  if (!extracted) return null;
+  return safeParseJsonObject(extracted);
 }
 
 function stripBrandingFromAdvancedBodyCompositionPayload(payload) {
@@ -1012,7 +1165,7 @@ function mergeTestEntries(existing, incoming) {
   return Array.from(map.values());
 }
 
-async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames }) {
+async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 You must strictly extract test data from medical PDF(s).
@@ -1061,14 +1214,39 @@ Do not add text.
 Return JSON only.`;
 
   let content = "";
-  if (requireString(extractedText)) {
+  const resolvedProvider = normalizeAiProvider(provider);
+  const textForPrompt = requireString(extractedText)
+    ? extractedText
+    : resolvedProvider === "claude"
+      ? await extractPdfTextRawForPrompt(pdfFiles)
+      : "";
+
+  if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: `${userPrompt}\n\n[PDF_TEXT]\n${textForPrompt}` }]
+        }
+      ],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? {};
+    return normalizeIncomingTests(parsedJson);
+  }
+
+  if (requireString(textForPrompt)) {
     const completion = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
-        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
+        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${textForPrompt}` }
       ]
     });
     content = completion.choices?.[0]?.message?.content ?? "";
@@ -1097,7 +1275,7 @@ Return JSON only.`;
   return normalizeIncomingTests(parsedJson);
 }
 
-async function extractAllBloodParametersFromText({ openai, extractedText }) {
+async function extractAllBloodParametersFromText({ openai, extractedText, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1130,22 +1308,39 @@ Return JSON ONLY with this format:
   ]
 }`;
 
-  const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
-      { role: "user", content: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }
-    ]
-  });
+  let content = "";
+  if (normalizeAiProvider(provider) === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }]
+        }
+      ],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+  } else {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  }
 
-  const content = completion.choices?.[0]?.message?.content ?? "";
-  const parsedJson = safeParseJsonObject(content) ?? {};
+  const parsedJson = (normalizeAiProvider(provider) === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ?? {};
   return normalizeLooseIncomingTests(parsedJson);
 }
 
-async function extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText }) {
+async function extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1178,34 +1373,56 @@ Return JSON ONLY with this format:
   ]
 }`;
 
-  const contentParts = [
-    {
-      type: "text",
-      text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 12000)}`
+  let content = "";
+  if (normalizeAiProvider(provider) === "claude") {
+    const parts = [
+      { type: "text", text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 12000)}` }
+    ];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
     }
-  ];
-  for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
-    const b64 = f.buffer.toString("base64");
-    const dataUrl = `data:${f.mimetype};base64,${b64}`;
-    contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+  } else {
+    const contentParts = [
+      {
+        type: "text",
+        text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 12000)}`
+      }
+    ];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: contentParts }
+      ]
+    });
+
+    content = completion.choices?.[0]?.message?.content ?? "";
   }
 
-  const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-    temperature: 0,
-    response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
-      { role: "user", content: contentParts }
-    ]
-  });
-
-  const content = completion.choices?.[0]?.message?.content ?? "";
-  const parsedJson = safeParseJsonObject(content) ?? {};
+  const parsedJson = (normalizeAiProvider(provider) === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ?? {};
   return normalizeLooseIncomingTests(parsedJson);
 }
 
-async function extractTestsFromImagesAndText({ openai, imageFiles, extractedText, testNames }) {
+async function extractTestsFromImagesAndText({ openai, imageFiles, extractedText, testNames, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1246,6 +1463,34 @@ Do not add extra keys.
 Do not add text.
 Return JSON only.`;
 
+  const resolvedProvider = normalizeAiProvider(provider);
+  let content = "";
+
+  if (resolvedProvider === "claude") {
+    const parts = [
+      {
+        type: "text",
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(extractedText, 10000)}`
+      }
+    ];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? {};
+    return normalizeIncomingTests(parsedJson);
+  }
+
   const contentParts = [
     { type: "text", text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(extractedText, 10000)}` }
   ];
@@ -1266,7 +1511,7 @@ Return JSON only.`;
     ]
   });
 
-  const content = completion.choices?.[0]?.message?.content ?? "";
+  content = completion.choices?.[0]?.message?.content ?? "";
   const parsedJson = safeParseJsonObject(content) ?? {};
   return normalizeIncomingTests(parsedJson);
 }
@@ -1288,7 +1533,7 @@ function normalizeHeartRelatedIncomingTests(parsedJson) {
     .filter(Boolean);
 }
 
-async function extractHeartRelatedTestsFromPdfs({ openai, pdfFiles, extractedText }) {
+async function extractHeartRelatedTestsFromPdfs({ openai, pdfFiles, extractedText, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1325,14 +1570,39 @@ Status must be one of:
 If a test is not found, do not include it.`;
 
   let content = "";
-  if (requireString(extractedText)) {
+  const resolvedProvider = normalizeAiProvider(provider);
+  const textForPrompt = requireString(extractedText)
+    ? extractedText
+    : resolvedProvider === "claude"
+      ? await extractPdfTextRawForPrompt(pdfFiles)
+      : "";
+
+  if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: `${userPrompt}\n\n[PDF_TEXT]\n${textForPrompt}` }]
+        }
+      ],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? {};
+    return normalizeHeartRelatedIncomingTests(parsedJson);
+  }
+
+  if (requireString(textForPrompt)) {
     const completion = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
-        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
+        { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${textForPrompt}` }
       ]
     });
     content = completion.choices?.[0]?.message?.content ?? "";
@@ -1422,7 +1692,7 @@ function hasUrinogramMarkers(text) {
   return false;
 }
 
-async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, extractedText }) {
+async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, extractedText, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1492,6 +1762,41 @@ Rules:
   - reference_range = ""
   - status = "Not included in the PDF"
 - Output must be valid JSON only.`;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  if (resolvedProvider === "claude") {
+    const parts = [
+      {
+        type: "text",
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 8000, [
+          "Complete Urinogram",
+          "Urinogram",
+          "Microscopic Examination",
+          "Chemical Examination",
+          "Urinary Protein",
+          "Urinary Glucose"
+        ])}`
+      }
+    ];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+
+    const content = getTextFromAnthropicMessageResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? {};
+    return normalizeUrinogramIncomingTests(parsedJson);
+  }
 
   let content = "";
   const pdfList = Array.isArray(pdfFiles) ? pdfFiles : [];
@@ -1593,9 +1898,13 @@ Rules:
 
 gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const file = req.file;
@@ -1674,6 +1983,36 @@ gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, 
       "}"
     ].join("\n");
 
+    if (extractedText && provider === "claude") {
+      const response = await anthropicCreateJsonMessage({
+        system: "You extract structured data from a Body Composition Analysis Report in JSON.",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `${schemaHint}\n\n[REQUEST_ID]\n${requestId}\n\n[PDF_TEXT]\n${extractedText}`
+              }
+            ]
+          }
+        ],
+        model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+        temperature: 0,
+        maxTokens: 4096
+      });
+
+      const content = getTextFromAnthropicMessageResponse(response);
+      const json = stripBrandingFromAdvancedBodyCompositionPayload(safeParseJsonObjectLoose(content));
+
+      res.json({
+        requestId,
+        data: json,
+        raw: json ? null : content
+      });
+      return;
+    }
+
     if (extractedText) {
       const completion = await openai.chat.completions.create({
         model: process.env.OPENAI_MODEL || "gpt-4o-mini",
@@ -1694,6 +2033,12 @@ gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, 
         raw: json ? null : content
       });
       return;
+    }
+
+    if (provider === "claude") {
+      return res.status(400).json({
+        error: "Could not extract readable text from this PDF for Claude. Use GPT or upload a text-based PDF."
+      });
     }
 
     const base64 = file.buffer.toString("base64");
@@ -1740,9 +2085,13 @@ gptRouter.post(
   ]),
   async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const uploaded = collectUploadedFiles(req);
@@ -1762,7 +2111,10 @@ gptRouter.post(
       return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
     }
 
-    const pdfText = await extractPdfTextForPrompt(pdfFiles);
+    const pdfText =
+      provider === "claude"
+        ? await extractPdfTextRawForPrompt(pdfFiles)
+        : await extractPdfTextForPrompt(pdfFiles);
     const docxText = await extractDocxTextForPrompt(docxFiles);
     const extractedText = `${pdfText}${docxText}`;
 
@@ -1771,14 +2123,16 @@ gptRouter.post(
     const heartPromise = extractHeartRelatedTestsFromPdfs({
       openai,
       pdfFiles,
-      extractedText
+      extractedText,
+      provider
     });
 
     const urinePromise = extractUrinogramTestsFromPdfs({
       openai,
       pdfFiles,
       imageFiles,
-      extractedText
+      extractedText,
+      provider
     });
 
     const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
@@ -1787,7 +2141,8 @@ gptRouter.post(
         openai,
         pdfFiles,
         extractedText,
-        testNames: chunk
+        testNames: chunk,
+        provider
       });
     });
 
@@ -1821,9 +2176,13 @@ gptRouter.post(
   ]),
   async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const uploaded = collectUploadedFiles(req);
@@ -1842,7 +2201,8 @@ gptRouter.post(
     const incoming = await extractHeartRelatedTestsFromPdfs({
       openai,
       pdfFiles,
-      extractedText
+      extractedText,
+      provider
     });
 
     const heartTests = Array.isArray(incoming) ? incoming : [];
@@ -1862,9 +2222,13 @@ gptRouter.post(
   ]),
   async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const uploaded = collectUploadedFiles(req);
@@ -1890,7 +2254,8 @@ gptRouter.post(
       openai,
       pdfFiles,
       imageFiles,
-      extractedText
+      extractedText,
+      provider
     });
 
     const tests = buildCompleteUrinogramTests(incoming);
@@ -1911,9 +2276,13 @@ gptRouter.post(
   ]),
   async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const uploaded = collectUploadedFiles(req);
@@ -1947,8 +2316,13 @@ gptRouter.post(
 
     const incoming =
       imageFiles.length > 0
-        ? await extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText: chunkText })
-        : await extractAllBloodParametersFromText({ openai, extractedText: chunkText });
+        ? await extractAllBloodParametersFromImagesAndText({
+          openai,
+          imageFiles,
+          extractedText: chunkText,
+          provider
+        })
+        : await extractAllBloodParametersFromText({ openai, extractedText: chunkText, provider });
 
     const merged = mergeTestEntries([], Array.isArray(incoming) ? incoming : []);
     const hasAny = merged.length > 0;
@@ -1968,9 +2342,13 @@ gptRouter.post(
   ]),
   async (req, res) => {
   try {
-    const openai = getOpenAIClient();
-    if (!openai) {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
       return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
     const uploaded = collectUploadedFiles(req);
@@ -1997,7 +2375,8 @@ gptRouter.post(
       openai,
       pdfFiles,
       extractedText,
-      testNames: chunk
+      testNames: chunk,
+      provider
     });
 
     const strict = buildStrictCategory(chunk, { tests: incoming });
