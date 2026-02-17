@@ -1956,13 +1956,12 @@ Do not hallucinate.
 Extract values exactly as written in the report.`;
 
   const userPrompt = `Read the PDF page by page systematically
-Extract every single parameter (ratios, physical exam, microscopy, remarks — everything)
+Extract every single parameter (ratios, physical exam, microscopy)
 Self-audit before writing (page count check, status verification, count check)
-Build the 3-sheet color-coded Excel automatically
 Run a quality checklist before delivering
 
 Rules:
-- Extract ONLY parameters that are present with an observed value.
+- Extract ONLY parameters that are present with an observed value and related to any medical test.
 - Do NOT invent missing tests.
 - Keep the observed value text exactly as written.
 - If unit/referenceRange/section/page/remarks are missing, set them to null.
@@ -1971,7 +1970,7 @@ Rules:
 
 Important output constraint:
 - Keep output compact to avoid truncation.
-- Return at most 420 tests for this chunk.
+- Return all the tests that are present with an observed value and related to any medical test.
 
 Return ONLY valid JSON with this structure (no extra wrapper text):
 {
@@ -2081,7 +2080,7 @@ Build the 3-sheet color-coded Excel automatically
 Run a quality checklist before delivering
 
 Rules:
-- Extract ONLY parameters that are present with an observed value.
+- Extract ONLY parameters that are present with an observed value and related to any medical test.
 - Do NOT invent missing tests.
 - Keep the observed value text exactly as written.
 - If unit/referenceRange/section/page/remarks are missing, set them to null.
@@ -2090,7 +2089,7 @@ Rules:
 
 Important output constraint:
 - Keep output compact to avoid truncation.
-- Return at most 420 tests for this chunk.
+- Return all the tests that are present with an observed value and related to any medical test.
 
 Return ONLY valid JSON with this structure (no extra wrapper text):
 {
@@ -2117,7 +2116,9 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       "remarks": string|null
     }
   ]
-}`;
+}
+  
+`;
 
   const resolvedProvider = normalizeAiProvider(provider);
   const schemaHint = `Schema:
