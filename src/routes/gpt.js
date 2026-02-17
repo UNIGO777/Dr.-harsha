@@ -3,6 +3,7 @@ import multer from "multer";
 import OpenAI from "openai";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
+import ExcelJS from "exceljs";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -322,6 +323,213 @@ function sliceTextFixed(text, chunkIndex, maxChunks) {
   return { safeIndex, totalChunks, chunkSize, chunkText: s.slice(start, end) };
 }
 
+function sliceTextFixedWithOverlap(text, chunkIndex, maxChunks, overlapChars) {
+  const s = typeof text === "string" ? text : "";
+  const requested = Number.isFinite(maxChunks) ? Math.max(1, Math.trunc(maxChunks)) : 4;
+  const totalChunks = Math.max(1, Math.min(requested, s.length || 1));
+  const chunkSize = Math.max(1, Math.ceil(s.length / totalChunks));
+  const safeIndex = Math.min(Math.max(0, chunkIndex), totalChunks - 1);
+
+  const overlap = Number.isFinite(overlapChars) ? Math.max(0, Math.trunc(overlapChars)) : 0;
+  const baseStart = safeIndex * chunkSize;
+  const baseEnd = baseStart + chunkSize;
+  const start = Math.max(0, baseStart - (safeIndex > 0 ? overlap : 0));
+  const end = Math.min(s.length, baseEnd + (safeIndex < totalChunks - 1 ? overlap : 0));
+
+  return {
+    safeIndex,
+    totalChunks,
+    chunkSize,
+    chunkText: s.slice(start, end)
+  };
+}
+
+function splitTextWindows(text, windowChars, overlapChars, maxWindows) {
+  const s = typeof text === "string" ? text : "";
+  const trimmed = s.trim();
+  if (!trimmed) return [];
+  const size = Number.isFinite(windowChars) ? Math.max(4000, Math.trunc(windowChars)) : 12000;
+  const overlap = Number.isFinite(overlapChars) ? Math.max(0, Math.trunc(overlapChars)) : 600;
+  const cap = Number.isFinite(maxWindows) ? Math.max(1, Math.trunc(maxWindows)) : 8;
+  const step = Math.max(1, size - overlap);
+
+  const windows = [];
+  for (let start = 0; start < s.length && windows.length < cap; start += step) {
+    const end = Math.min(s.length, start + size);
+    const chunk = s.slice(start, end);
+    if (chunk.trim()) windows.push(chunk);
+    if (end >= s.length) break;
+  }
+  return windows;
+}
+
+function heuristicExtractDocsTestsFromText(extractedText) {
+  const text = typeof extractedText === "string" ? extractedText : "";
+  if (!text.trim()) return [];
+
+  const normalizedText = text
+    .replace(/([A-Za-zµμ/%])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([A-Za-zµμ/%])/g, "$1 $2")
+    .replace(/[ \t]+/g, " ");
+
+  const looksLikeRange = (s) => {
+    const v = String(s ?? "").trim();
+    if (!v) return false;
+    if (!/[0-9]/.test(v)) return false;
+    return /(\bto\b|[-–—]|<|>)/i.test(v);
+  };
+
+  const looksLikeUnit = (s) => {
+    const v = String(s ?? "").trim();
+    if (!v) return false;
+    if (looksLikeRange(v)) return false;
+    if (v.length > 25) return false;
+    return /[a-z%/]/i.test(v);
+  };
+
+  const looksLikeValue = (s) => {
+    const v = String(s ?? "").trim();
+    if (!v) return false;
+    if (/[0-9]/.test(v)) return true;
+    return /\b(absent|present|nil|negative|positive|trace|reactive|non\s*reactive)\b/i.test(v);
+  };
+
+  const looksLikeNumericValue = (s) => {
+    const v = String(s ?? "").trim();
+    if (!v) return false;
+    if (!/[0-9]/.test(v)) return false;
+    return /^[<>]?[0-9]+([.,][0-9]+)?$/.test(v) || /^[0-9]+([.,][0-9]+)?%$/.test(v);
+  };
+
+  const isTechToken = (s) => {
+    const v = String(s ?? "").trim().toUpperCase();
+    if (!v) return false;
+    return (
+      v === "PHOTOMETRY" ||
+      v === "CALCULATED" ||
+      v === "CALC" ||
+      v === "C.M.I." ||
+      v === "CMI" ||
+      v === "ECLIA" ||
+      v === "ELISA" ||
+      v === "CLIA" ||
+      v === "HPLC" ||
+      v === "ASSAY" ||
+      v === "METHOD" ||
+      v === "TECHNOLOGY"
+    );
+  };
+
+  const ignoreLine = (line) => {
+    const l = String(line ?? "").trim();
+    if (!l) return true;
+    if (l.length < 3 || l.length > 240) return true;
+    const lower = l.toLowerCase();
+    if (lower.startsWith("page ")) return true;
+    if (lower.includes("reference range") && lower.length < 50) return true;
+    if (lower.includes("method") && lower.includes("unit") && lower.includes("result")) return true;
+    if (lower.includes("patient") && lower.includes("name")) return true;
+    if (lower.includes("collected") && lower.includes("reported")) return true;
+    return false;
+  };
+
+  const lines = normalizedText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => !ignoreLine(l));
+
+  const out = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const hasColon = line.includes(":") && !line.includes("http");
+    if (hasColon) {
+      const idx = line.indexOf(":");
+      const name = line.slice(0, idx).trim();
+      const tail = line.slice(idx + 1).trim();
+      if (name && looksLikeValue(tail)) {
+        const key = `${name.toLowerCase()}|${tail.toLowerCase()}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          out.push({
+          testName: name,
+          value: tail,
+          unit: null,
+          referenceRange: null,
+          status: computeStatus({ value: tail, referenceRange: null, fallbackStatus: null }),
+          section: null,
+          page: null,
+          remarks: null
+          });
+        }
+        continue;
+      }
+    }
+
+    const tokens = line.split(/\s+/).map((t) => t.trim()).filter(Boolean);
+    if (tokens.length < 2) continue;
+    const numericIndex = tokens.findIndex((t) => looksLikeNumericValue(t));
+    if (numericIndex === -1) continue;
+    const value = tokens[numericIndex];
+    if (!looksLikeValue(value)) continue;
+
+    const tokenBefore = numericIndex > 0 ? tokens[numericIndex - 1] : null;
+    const tokenAfter = numericIndex + 1 < tokens.length ? tokens[numericIndex + 1] : null;
+
+    let unit = null;
+    if (tokenBefore && looksLikeUnit(tokenBefore) && !isTechToken(tokenBefore)) unit = tokenBefore;
+    if (!unit && tokenAfter && looksLikeUnit(tokenAfter) && !isTechToken(tokenAfter)) unit = tokenAfter;
+
+    let nameTokens = [];
+    if (numericIndex + 1 < tokens.length) {
+      let start = numericIndex + 1;
+      if (unit && tokens[start] === unit) start += 1;
+      if (tokens[start] === "%") start += 1;
+      nameTokens = tokens.slice(start);
+    }
+
+    if (nameTokens.length === 0 && numericIndex > 0) {
+      nameTokens = tokens.slice(0, numericIndex);
+      if (unit && nameTokens.length > 0 && nameTokens[nameTokens.length - 1] === unit) {
+        nameTokens = nameTokens.slice(0, -1);
+      }
+    }
+
+    while (nameTokens.length > 0 && isTechToken(nameTokens[0])) nameTokens.shift();
+    const testName = nameTokens.join(" ").trim();
+    if (!requireString(testName) || !/[a-z]/i.test(testName)) continue;
+
+    let referenceRange = null;
+    const rangeCandidates = tokens.filter((t) => looksLikeRange(t));
+    if (rangeCandidates.length > 0) referenceRange = rangeCandidates[0];
+
+    const key = `${testName.toLowerCase()}|${String(value).toLowerCase()}|${String(unit ?? "").toLowerCase()}|${String(referenceRange ?? "").toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push({
+      testName,
+      value,
+      unit,
+      referenceRange,
+      status: computeStatus({ value, referenceRange, fallbackStatus: null }),
+      section: null,
+      page: null,
+      remarks: null
+    });
+  }
+
+  return out;
+}
+
+function estimateTotalTestsInReportText(extractedText) {
+  const text = typeof extractedText === "string" ? extractedText : "";
+  if (!text.trim()) return null;
+  const extracted = heuristicExtractDocsTestsFromText(text);
+  const count = Array.isArray(extracted) ? extracted.length : 0;
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return Math.min(5000, Math.trunc(count));
+}
+
 const MAX_UPLOAD_MB = (() => {
   const raw = process.env.MAX_UPLOAD_MB;
   const n = typeof raw === "string" ? Number(raw) : null;
@@ -499,6 +707,121 @@ function safeParseJsonObjectLoose(text) {
   const extracted = extractFirstJsonObjectText(text);
   if (!extracted) return null;
   return safeParseJsonObject(extracted);
+}
+
+function extractFirstJsonArrayText(text) {
+  if (!requireString(text)) return null;
+  const s = String(text);
+  const start = s.indexOf("[");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i += 1) {
+    const ch = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === "\\") {
+      if (inString) escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "[") depth += 1;
+    else if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+function safeParseJsonArray(text) {
+  if (!requireString(text)) return null;
+  try {
+    const v = JSON.parse(text);
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function safeParseJsonArrayLoose(text) {
+  const direct = safeParseJsonArray(text);
+  if (direct) return direct;
+  const extracted = extractFirstJsonArrayText(text);
+  if (!extracted) return null;
+  return safeParseJsonArray(extracted);
+}
+
+async function repairJsonObjectWithClaude({ rawText, schemaHint, model }) {
+  const cleaned = requireString(rawText) ? rawText : "";
+  const system = `You are a JSON repair tool.
+
+Return ONLY valid JSON.
+Do not return markdown.
+Do not return explanations.
+Do not hallucinate new fields.`;
+
+  const user = `${requireString(schemaHint) ? schemaHint : ""}
+
+You are given a model output that was supposed to be a single JSON object, but it may be truncated or invalid.
+Your job:
+- Extract the largest valid JSON object you can recover.
+- If there are incomplete trailing objects/arrays, drop the incomplete tail.
+- Output ONE JSON object only.
+
+[MODEL_OUTPUT]
+${cleaned}`;
+
+  const response = await anthropicCreateJsonMessage({
+    system,
+    messages: [{ role: "user", content: [{ type: "text", text: user }] }],
+    model: requireString(model) ? model : process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+    temperature: 0,
+    maxTokens: 2048
+  });
+
+  const content = getTextFromAnthropicMessageResponse(response);
+  return safeParseJsonObjectLoose(content);
+}
+
+async function repairJsonArrayWithClaude({ rawText, schemaHint, model }) {
+  const cleaned = requireString(rawText) ? rawText : "";
+  const system = `You are a JSON repair tool.
+
+Return ONLY valid JSON.
+Do not return markdown.
+Do not return explanations.
+Do not hallucinate new fields.`;
+
+  const user = `${requireString(schemaHint) ? schemaHint : ""}
+
+You are given a model output that was supposed to be a single JSON array, but it may be truncated or invalid.
+Your job:
+- Extract the largest valid JSON array you can recover.
+- If there are incomplete trailing objects/arrays, drop the incomplete tail.
+- Output ONE JSON array only.
+
+[MODEL_OUTPUT]
+${cleaned}`;
+
+  const response = await anthropicCreateJsonMessage({
+    system,
+    messages: [{ role: "user", content: [{ type: "text", text: user }] }],
+    model: requireString(model) ? model : process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+    temperature: 0,
+    maxTokens: 2048
+  });
+
+  const content = getTextFromAnthropicMessageResponse(response);
+  return safeParseJsonArrayLoose(content);
 }
 
 function stripBrandingFromAdvancedBodyCompositionPayload(payload) {
@@ -989,6 +1312,91 @@ function computeStatus({ value, referenceRange, fallbackStatus }) {
   return ALLOWED_STATUSES.has(s) ? s : "NORMAL";
 }
 
+async function buildDocsTestsExcelBuffer(tests) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "dr-harsha";
+  workbook.created = new Date();
+
+  const columns = [
+    { header: "Test Name", key: "testName", width: 32 },
+    { header: "Value", key: "value", width: 18 },
+    { header: "Unit", key: "unit", width: 12 },
+    { header: "Reference Range", key: "referenceRange", width: 22 },
+    { header: "Status", key: "status", width: 14 },
+    { header: "Section", key: "section", width: 22 },
+    { header: "Page", key: "page", width: 8 },
+    { header: "Remarks", key: "remarks", width: 28 }
+  ];
+
+  const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF0F172A" } };
+  const headerFont = { color: { argb: "FFFFFFFF" }, bold: true };
+
+  const sheetFill = {
+    normal: { type: "pattern", pattern: "solid", fgColor: { argb: "FFDCFCE7" } },
+    high: { type: "pattern", pattern: "solid", fgColor: { argb: "FFFEE2E2" } },
+    low: { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFEDD5" } }
+  };
+
+  const normalize = (t) => ({
+    testName: toNullOrString(t?.testName) ?? "",
+    value: toNullOrString(t?.value),
+    unit: toNullOrString(t?.unit),
+    referenceRange: toNullOrString(t?.referenceRange),
+    status: computeStatus({
+      value: toNullOrString(t?.value),
+      referenceRange: toNullOrString(t?.referenceRange),
+      fallbackStatus: t?.status
+    }),
+    section: toNullOrString(t?.section),
+    page: typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null,
+    remarks: toNullOrString(t?.remarks)
+  });
+
+  const safeTests = (Array.isArray(tests) ? tests.map(normalize) : []).filter((t) => t.value != null);
+
+  const normal = safeTests.filter((t) => String(t.status).toUpperCase() === "NORMAL");
+  const high = safeTests.filter((t) => String(t.status).toUpperCase() === "HIGH");
+  const low = safeTests.filter((t) => String(t.status).toUpperCase() === "LOW");
+
+  const addSheet = (name, rows, fill) => {
+    const ws = workbook.addWorksheet(name);
+    ws.columns = columns;
+    ws.getRow(1).eachCell((cell) => {
+      cell.fill = headerFill;
+      cell.font = headerFont;
+      cell.alignment = { vertical: "middle", horizontal: "left" };
+    });
+    ws.autoFilter = {
+      from: { row: 1, column: 1 },
+      to: { row: 1, column: columns.length }
+    };
+    for (const r of rows) {
+      const row = ws.addRow({
+        testName: r.testName,
+        value: r.value,
+        unit: r.unit,
+        referenceRange: r.referenceRange,
+        status: r.status,
+        section: r.section,
+        page: r.page,
+        remarks: r.remarks
+      });
+      row.eachCell((cell) => {
+        cell.fill = fill;
+        cell.alignment = { vertical: "top", horizontal: "left", wrapText: true };
+      });
+    }
+    ws.views = [{ state: "frozen", ySplit: 1 }];
+  };
+
+  addSheet("Normal", normal, sheetFill.normal);
+  addSheet("High", high, sheetFill.high);
+  addSheet("Low", low, sheetFill.low);
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+}
+
 function buildStrictCategory(list, incoming) {
   const incomingTests = Array.isArray(incoming?.tests) ? incoming.tests : [];
   const map = new Map();
@@ -1122,13 +1530,114 @@ function normalizeIncomingTests(incoming) {
     .filter(Boolean);
 }
 
-function normalizeLooseIncomingTests(incoming) {
-  const tests = Array.isArray(incoming?.tests) ? incoming.tests : [];
-  return tests
+function normalizeDocsTestsIncoming(incoming) {
+  const pickArray = (value) => (Array.isArray(value) ? value : []);
+  const candidates = [
+    ...pickArray(incoming?.tests),
+    ...pickArray(incoming?.parameters),
+    ...pickArray(incoming?.items),
+    ...pickArray(incoming?.results),
+    ...pickArray(incoming?.rows),
+    ...pickArray(incoming?.data)
+  ];
+
+  const tests = Array.isArray(incoming) ? incoming : candidates;
+
+  return pickArray(tests)
     .map((t) => {
       if (!t || typeof t !== "object" || Array.isArray(t)) return null;
       const testName =
-        toNullOrString(t?.testName) ?? toNullOrString(t?.test_name) ?? toNullOrString(t?.name);
+        toNullOrString(t?.testName) ??
+        toNullOrString(t?.test_name) ??
+        toNullOrString(t?.name) ??
+        toNullOrString(t?.parameterName) ??
+        toNullOrString(t?.parameter) ??
+        toNullOrString(t?.analyte) ??
+        toNullOrString(t?.test) ??
+        toNullOrString(t?.itemName);
+      if (!testName) return null;
+      const value = toNullOrString(t?.value) ?? toNullOrString(t?.observed_value);
+      const unit = toNullOrString(t?.unit) ?? toNullOrString(t?.units);
+      const referenceRange =
+        toNullOrString(t?.referenceRange) ?? toNullOrString(t?.reference_range) ?? toNullOrString(t?.range);
+      return { testName, value, unit, referenceRange };
+    })
+    .filter(Boolean);
+}
+
+function normalizeLooseIncomingTests(incoming) {
+  const pickArray = (value) => (Array.isArray(value) ? value : []);
+
+  const direct = [
+    ...pickArray(incoming?.tests),
+    ...pickArray(incoming?.blood_tests),
+    ...pickArray(incoming?.parameters),
+    ...pickArray(incoming?.items),
+    ...pickArray(incoming?.results),
+    ...pickArray(incoming?.rows),
+    ...pickArray(incoming?.data),
+    ...pickArray(incoming?.blood?.tests),
+    ...pickArray(incoming?.blood?.parameters),
+    ...pickArray(incoming?.result?.tests),
+    ...pickArray(incoming?.result?.parameters)
+  ];
+
+  const fromExcel = [];
+  const excelSheets = incoming?.excelSheets ?? incoming?.sheets ?? incoming?.excel ?? null;
+  if (excelSheets && typeof excelSheets === "object" && !Array.isArray(excelSheets)) {
+    const entries = Object.entries(excelSheets);
+    for (const [k, v] of entries) {
+      const key = String(k || "").toLowerCase();
+      if (key.includes("normal") || key.includes("abnormal") || key.includes("notpresent")) {
+        fromExcel.push(...pickArray(v));
+        continue;
+      }
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        for (const [kk, vv] of Object.entries(v)) {
+          const subKey = String(kk || "").toLowerCase();
+          if (subKey.includes("normal") || subKey.includes("abnormal") || subKey.includes("notpresent")) {
+            fromExcel.push(...pickArray(vv));
+          }
+        }
+      }
+    }
+  }
+
+  const fromNested = [];
+  if (incoming && typeof incoming === "object" && !Array.isArray(incoming)) {
+    for (const v of Object.values(incoming)) {
+      if (!Array.isArray(v)) continue;
+      const arr = v;
+      if (arr.length === 0) continue;
+      const looksLikeTests = arr.some((x) => {
+        if (!x || typeof x !== "object" || Array.isArray(x)) return false;
+        return (
+          requireString(x?.testName) ||
+          requireString(x?.test_name) ||
+          requireString(x?.name) ||
+          requireString(x?.parameter) ||
+          requireString(x?.parameterName) ||
+          requireString(x?.analyte) ||
+          requireString(x?.test)
+        );
+      });
+      if (looksLikeTests) fromNested.push(...arr);
+    }
+  }
+
+  const tests = direct.length > 0 ? direct : fromExcel.length > 0 ? fromExcel : fromNested;
+  return pickArray(tests)
+    .map((t) => {
+      if (!t || typeof t !== "object" || Array.isArray(t)) return null;
+      const testName =
+        toNullOrString(t?.testName) ??
+        toNullOrString(t?.test_name) ??
+        toNullOrString(t?.name) ??
+        toNullOrString(t?.parameterName) ??
+        toNullOrString(t?.parameter) ??
+        toNullOrString(t?.analyte) ??
+        toNullOrString(t?.test) ??
+        toNullOrString(t?.itemName);
       if (!testName) return null;
       const value = toNullOrString(t?.value) ?? toNullOrString(t?.observed_value);
       const unit = toNullOrString(t?.unit) ?? toNullOrString(t?.units);
@@ -1136,7 +1645,10 @@ function normalizeLooseIncomingTests(incoming) {
         toNullOrString(t?.referenceRange) ?? toNullOrString(t?.reference_range) ?? toNullOrString(t?.range);
       const status = toNullOrString(t?.status);
       const computed = computeStatus({ value, referenceRange, fallbackStatus: status });
-      return { testName, value, unit, referenceRange, status: computed };
+      const section = toNullOrString(t?.section);
+      const page = typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null;
+      const remarks = toNullOrString(t?.remarks);
+      return { testName, value, unit, referenceRange, status: computed, section, page, remarks };
     })
     .filter(Boolean);
 }
@@ -1275,7 +1787,7 @@ Return JSON only.`;
   return normalizeIncomingTests(parsedJson);
 }
 
-async function extractAllBloodParametersFromText({ openai, extractedText, provider }) {
+async function extractAllBloodParametersFromText({ openai, extractedText, provider, debug }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1285,42 +1797,81 @@ Do not add extra fields.
 Do not hallucinate.
 Extract values exactly as written in the report.`;
 
-  const userPrompt = `Extract ALL blood test parameters present in the provided report text.
+  const userPrompt = `Read the report text systematically (in order). Treat it like reading the PDF page-by-page.
 
-Only include parameters that are actually present with a value in the text.
-Do not include urine/stool tests.
+Extract EVERY single parameter/value row you can find, including:
+- Ratios and derived values
+- Any "Physical Examination", "Chemical Examination", "Microscopy", "Impression", "Remarks" style values
+- Any lab table line-items (even if they are not typical blood markers)
 
-For EACH parameter return:
-- testName
-- value
-- unit
-- referenceRange
-- status
+Rules:
+- Extract ONLY what is actually present with an observed value in the report text.
+- Do NOT invent missing tests.
+- Keep the observed value text exactly as written.
+- If unit/range/remarks are missing, set them to null.
+- Prefer one row per distinct parameter occurrence; dedupe only if exact duplicates.
 
-Status Rules:
-- If referenceRange is available and value is numeric, set status to LOW/HIGH/NORMAL.
+Status rules:
+- If referenceRange is available AND value is numeric (or contains a numeric), set status to LOW/HIGH/NORMAL accordingly.
 - Otherwise set status to NORMAL.
 
-Return JSON ONLY with this format:
+Self-audit before returning JSON:
+- Page/order check: confirm you processed the text from start to end without skipping blocks.
+- Status verification: confirm any LOW/HIGH assignment is supported by the reference range.
+- Count check: ensure tests.length matches the number of extracted line-items (no obvious omissions).
+
+Important output constraint:
+- Keep output compact to avoid truncation.
+- Return at most 120 tests for this chunk.
+
+Return ONLY valid JSON with this structure (no extra wrapper text):
+{
+  "meta": {
+    "pagesAudited": number|null,
+    "parametersExtracted": number,
+    "qualityChecklist": {
+      "pageCountChecked": boolean,
+      "statusVerified": boolean,
+      "countChecked": boolean,
+      "noHallucinations": boolean,
+      "deduped": boolean
+    }
+  },
+  "tests": [
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "LOW"|"HIGH"|"NORMAL",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
+  ]
+}`;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  const schemaHint = `Schema:
 {
   "tests": [
-    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
+    { "testName": string, "value": string, "unit": string|null, "referenceRange": string|null, "status": "LOW"|"HIGH"|"NORMAL", "section": string|null, "page": number|null, "remarks": string|null }
   ]
 }`;
 
   let content = "";
-  if (normalizeAiProvider(provider) === "claude") {
+  if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
       system: `${systemPrompt}\n\nOutput must be JSON.`,
       messages: [
         {
           role: "user",
-          content: [{ type: "text", text: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }]
+          content: [{ type: "text", text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 12000)}` }]
         }
       ],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
-      maxTokens: 4096
+      maxTokens: 8192
     });
     content = getTextFromAnthropicMessageResponse(response);
   } else {
@@ -1336,11 +1887,65 @@ Return JSON ONLY with this format:
     content = completion.choices?.[0]?.message?.content ?? "";
   }
 
-  const parsedJson = (normalizeAiProvider(provider) === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ?? {};
-  return normalizeLooseIncomingTests(parsedJson);
+  let parsedJson =
+    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ?? null;
+  if (!parsedJson && resolvedProvider === "claude") {
+    parsedJson = await repairJsonObjectWithClaude({
+      rawText: content,
+      schemaHint,
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
+    });
+  }
+  if (resolvedProvider === "claude") {
+    const maybeTests = normalizeLooseIncomingTests(parsedJson ?? {});
+    if (maybeTests.length === 0) {
+      const fallbackUserPrompt = `Extract lab parameter rows from the report text.
+
+Rules:
+- Extract ONLY line-items that have an observed value.
+- Keep value text exactly as written.
+- Return at least 20 items if present.
+- Return at most 80 items.
+
+Return JSON only:
+{
+  "tests": [
+    { "testName": "", "value": "", "unit": null, "referenceRange": null, "status": "NORMAL", "section": null, "page": null, "remarks": null }
+  ]
+}`;
+
+      const response2 = await anthropicCreateJsonMessage({
+        system: `${systemPrompt}\n\nOutput must be JSON.`,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: `${fallbackUserPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 9000)}` }]
+          }
+        ],
+        model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+        temperature: 0,
+        maxTokens: 4096
+      });
+      const content2 = getTextFromAnthropicMessageResponse(response2);
+      let parsed2 = safeParseJsonObjectLoose(content2);
+      if (!parsed2) {
+        parsed2 = await repairJsonObjectWithClaude({
+          rawText: content2,
+          schemaHint,
+          model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
+        });
+      }
+      parsedJson = parsed2 ?? parsedJson;
+      content = maybeTests.length > 0 ? content : content2;
+    }
+  }
+
+  const tests = normalizeLooseIncomingTests(parsedJson ?? {});
+  if (debug) return { tests, raw: content };
+  return { tests };
 }
 
-async function extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText, provider }) {
+async function extractDocsTestsFromText({ openai, extractedText, provider, debug }) {
   const systemPrompt = `You are a medical report extraction engine.
 
 Return ONLY valid JSON.
@@ -1350,31 +1955,321 @@ Do not add extra fields.
 Do not hallucinate.
 Extract values exactly as written in the report.`;
 
-  const userPrompt = `Extract ALL blood test parameters present in the provided medical report images and text.
+  const userPrompt = `Read the PDF page by page systematically
+Extract every single parameter (ratios, physical exam, microscopy, remarks — everything)
+Self-audit before writing (page count check, status verification, count check)
+Build the 3-sheet color-coded Excel automatically
+Run a quality checklist before delivering
 
-Only include parameters that are actually present with a value.
-Do not include urine/stool tests.
+Rules:
+- Extract ONLY parameters that are present with an observed value.
+- Do NOT invent missing tests.
+- Keep the observed value text exactly as written.
+- If unit/referenceRange/section/page/remarks are missing, set them to null.
+- Do NOT skip any row in any table. Extract every line-item, even long names (e.g. "Total Iron Binding Capacity (TIBC)").
+- Prefer one row per parameter occurrence; dedupe only exact duplicates.
 
-For EACH parameter return:
-- testName
-- value
-- unit
-- referenceRange
-- status
+Important output constraint:
+- Keep output compact to avoid truncation.
+- Return at most 420 tests for this chunk.
 
-Status Rules:
-- If referenceRange is available and value is numeric, set status to LOW/HIGH/NORMAL.
-- Otherwise set status to NORMAL.
+Return ONLY valid JSON with this structure (no extra wrapper text):
+{
+  "meta": {
+    "pagesAudited": number|null,
+    "parametersExtracted": number,
+    "qualityChecklist": {
+      "pageCountChecked": boolean,
+      "statusVerified": boolean,
+      "countChecked": boolean,
+      "noHallucinations": boolean,
+      "deduped": boolean
+    }
+  },
+  "tests": [
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "LOW"|"HIGH"|"NORMAL",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
+  ]
+}`;
 
-Return JSON ONLY with this format:
+  const resolvedProvider = normalizeAiProvider(provider);
+  const schemaHint = `Schema:
 {
   "tests": [
-    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "LOW"|"HIGH"|"NORMAL",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
   ]
 }`;
 
   let content = "";
-  if (normalizeAiProvider(provider) === "claude") {
+  if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 20000)}` }]
+        }
+      ],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 8192
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+  } else {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  let parsedJson =
+    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ??
+    safeParseJsonArrayLoose(content) ??
+    null;
+
+  if (!parsedJson && resolvedProvider === "claude") {
+    const repairedObject = await repairJsonObjectWithClaude({
+      rawText: content,
+      schemaHint,
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
+    });
+    parsedJson = repairedObject ?? (await repairJsonArrayWithClaude({ rawText: content, schemaHint, model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022" }));
+  }
+
+  const tests = normalizeLooseIncomingTests(parsedJson ?? {});
+  if (debug) return { tests, raw: content };
+  return { tests };
+}
+
+async function extractDocsTestsFromImagesAndText({ openai, imageFiles, extractedText, provider, debug }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.
+Do not hallucinate.
+Extract values exactly as written in the report.`;
+
+  const userPrompt = `Read the PDF page by page systematically
+Extract every single parameter (ratios, physical exam, microscopy, remarks — everything)
+Self-audit before writing (page count check, status verification, count check)
+Build the 3-sheet color-coded Excel automatically
+Run a quality checklist before delivering
+
+Rules:
+- Extract ONLY parameters that are present with an observed value.
+- Do NOT invent missing tests.
+- Keep the observed value text exactly as written.
+- If unit/referenceRange/section/page/remarks are missing, set them to null.
+- Do NOT skip any row in any table. Extract every line-item, even long names (e.g. "Total Iron Binding Capacity (TIBC)").
+- Prefer one row per parameter occurrence; dedupe only exact duplicates.
+
+Important output constraint:
+- Keep output compact to avoid truncation.
+- Return at most 420 tests for this chunk.
+
+Return ONLY valid JSON with this structure (no extra wrapper text):
+{
+  "meta": {
+    "pagesAudited": number|null,
+    "parametersExtracted": number,
+    "qualityChecklist": {
+      "pageCountChecked": boolean,
+      "statusVerified": boolean,
+      "countChecked": boolean,
+      "noHallucinations": boolean,
+      "deduped": boolean
+    }
+  },
+  "tests": [
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "LOW"|"HIGH"|"NORMAL",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
+  ]
+}`;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  const schemaHint = `Schema:
+{
+  "tests": [
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "LOW"|"HIGH"|"NORMAL",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
+  ]
+}`;
+
+  let content = "";
+
+  if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(extractedText, 14000)}` }];
+    for (const f of imageFiles) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 8192
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+  } else {
+    const contentParts = [
+      { type: "text", text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(extractedText, 14000)}` }
+    ];
+    for (const f of imageFiles) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: contentParts }
+      ]
+    });
+
+    content = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  let parsedJson =
+    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ??
+    safeParseJsonArrayLoose(content) ??
+    null;
+
+  if (!parsedJson && resolvedProvider === "claude") {
+    const repairedObject = await repairJsonObjectWithClaude({
+      rawText: content,
+      schemaHint,
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
+    });
+    parsedJson = repairedObject ?? (await repairJsonArrayWithClaude({ rawText: content, schemaHint, model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022" }));
+  }
+
+  const tests = normalizeLooseIncomingTests(parsedJson ?? {});
+  if (debug) return { tests, raw: content };
+  return { tests };
+}
+
+async function extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText, provider, debug }) {
+  const systemPrompt = `You are a medical report extraction engine.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.
+Do not hallucinate.
+Extract values exactly as written in the report.`;
+
+  const userPrompt = `Read the report images and accompanying extracted text systematically (page-by-page).
+
+Extract EVERY single parameter/value row you can find, including:
+- Ratios and derived values
+- Any "Physical Examination", "Chemical Examination", "Microscopy", "Impression", "Remarks" style values
+- Any lab table line-items (even if they are not typical blood markers)
+
+Rules:
+- Extract ONLY what is actually present with an observed value in the images/text.
+- Do NOT invent missing tests.
+- Keep the observed value text exactly as written.
+- If unit/range/remarks are missing, set them to null.
+- Prefer one row per distinct parameter occurrence; dedupe only if exact duplicates.
+
+Status rules:
+- If referenceRange is available AND value is numeric (or contains a numeric), set status to LOW/HIGH/NORMAL accordingly.
+- Otherwise set status to NORMAL.
+
+Self-audit before returning JSON:
+- Page/order check: confirm you processed the content sequentially.
+- Status verification: confirm any LOW/HIGH assignment is supported by the reference range.
+- Count check: ensure tests.length matches the number of extracted line-items (no obvious omissions).
+
+Important output constraint:
+- Keep output compact to avoid truncation.
+- Return at most 120 tests for this chunk.
+
+Return ONLY valid JSON with this structure (no extra wrapper text):
+{
+  "meta": {
+    "pagesAudited": number|null,
+    "parametersExtracted": number,
+    "qualityChecklist": {
+      "pageCountChecked": boolean,
+      "statusVerified": boolean,
+      "countChecked": boolean,
+      "noHallucinations": boolean,
+      "deduped": boolean
+    }
+  },
+  "tests": [
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "LOW"|"HIGH"|"NORMAL",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
+  ]
+}`;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  const schemaHint = `Schema:
+{
+  "tests": [
+    { "testName": string, "value": string, "unit": string|null, "referenceRange": string|null, "status": "LOW"|"HIGH"|"NORMAL", "section": string|null, "page": number|null, "remarks": string|null }
+  ]
+}`;
+
+  let content = "";
+  if (resolvedProvider === "claude") {
     const parts = [
       { type: "text", text: `${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(extractedText, 12000)}` }
     ];
@@ -1389,7 +2284,7 @@ Return JSON ONLY with this format:
       messages: [{ role: "user", content: parts }],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
-      maxTokens: 4096
+      maxTokens: 8192
     });
     content = getTextFromAnthropicMessageResponse(response);
   } else {
@@ -1418,8 +2313,23 @@ Return JSON ONLY with this format:
     content = completion.choices?.[0]?.message?.content ?? "";
   }
 
-  const parsedJson = (normalizeAiProvider(provider) === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ?? {};
-  return normalizeLooseIncomingTests(parsedJson);
+  const parsedJson =
+    (resolvedProvider === "claude"
+      ? safeParseJsonObjectLoose(content)
+      : safeParseJsonObject(content)) ?? null;
+
+  let finalJson = parsedJson;
+  if (!finalJson && resolvedProvider === "claude") {
+    finalJson = await repairJsonObjectWithClaude({
+      rawText: content,
+      schemaHint,
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
+    });
+  }
+
+  const tests = normalizeLooseIncomingTests(finalJson ?? {});
+  if (debug) return { tests, raw: content };
+  return { tests };
 }
 
 async function extractTestsFromImagesAndText({ openai, imageFiles, extractedText, testNames, provider }) {
@@ -2169,6 +3079,193 @@ gptRouter.post(
 });
 
 gptRouter.post(
+  "/docs-tests",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+  try {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
+    }
+
+    const debugAi = process.env.AI_DEBUG === "1";
+
+    const uploaded = collectUploadedFiles(req);
+    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
+    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
+    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
+    const unsupportedFiles = uploaded.filter(
+      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
+    );
+    if (unsupportedFiles.length > 0) {
+      return res.status(400).json({
+        error: "Only PDF, DOCX, and image files are allowed."
+      });
+    }
+    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
+      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
+    }
+
+    const { chunkIndex } = getChunkParams(req);
+
+    const pdfText = await extractPdfTextForBloodPrompt(pdfFiles);
+    const docxText = await extractDocxTextForBloodPrompt(docxFiles);
+    const extractedText = `${pdfText}${docxText}`;
+
+    const estimatedTotalTestsInReport = estimateTotalTestsInReportText(extractedText);
+
+    if (!requireString(extractedText) && imageFiles.length === 0) {
+      if (provider === "claude") {
+        return res.status(400).json({
+          error:
+            "Claude could not extract tests because this PDF has no readable text. Please upload images (JPG/PNG) of the report pages or use GPT for scanned PDFs."
+        });
+      }
+      const docs = { data: false, tests: [] };
+      const payload = {
+        docs,
+        chunkIndex: 0,
+        totalChunks: 1,
+        chunkSize: 1,
+        estimatedTotalTestsInReport
+      };
+      if (debugAi) {
+        payload.debug = {
+          provider,
+          extractedTextLength: 0,
+          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
+          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
+          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0
+        };
+      }
+      return res.json(payload);
+    }
+
+    const { safeIndex, totalChunks, chunkText, chunkSize } = sliceTextFixedWithOverlap(
+      extractedText,
+      chunkIndex,
+      4,
+      1200
+    );
+    const estimatedTotalTestsInChunk = estimateTotalTestsInReportText(chunkText);
+
+    const windows = splitTextWindows(chunkText, 12000, 600, 8);
+    const aiIncoming = [];
+    let lastRaw = "";
+    if (imageFiles.length > 0) {
+      const extraction = await extractDocsTestsFromImagesAndText({
+        openai,
+        imageFiles,
+        extractedText: chunkText,
+        provider,
+        debug: debugAi
+      });
+      lastRaw = typeof extraction?.raw === "string" ? extraction.raw : "";
+      const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
+      aiIncoming.push(...incomingTests);
+    } else if (windows.length > 0) {
+      for (const w of windows) {
+        const extraction = await extractDocsTestsFromText({
+          openai,
+          extractedText: w,
+          provider,
+          debug: debugAi
+        });
+        lastRaw = typeof extraction?.raw === "string" ? extraction.raw : lastRaw;
+        const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
+        aiIncoming.push(...incomingTests);
+      }
+    }
+
+    const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
+    const merged = mergeTestEntries(aiIncoming, heuristicTests);
+    const chunkTests = merged.filter((t) => toNullOrString(t?.value) != null);
+
+    if (provider === "claude" && chunkTests.length === 0) {
+      const payload = {
+        error:
+          "Claude returned no parsable tests for this chunk. This usually happens when the response was truncated or not valid JSON. Enable AI_DEBUG=1 to see the response preview, or try the next chunk / use images."
+      };
+      if (debugAi) {
+        payload.debug = {
+          provider,
+          extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
+          chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
+          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
+          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
+          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
+          aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null
+        };
+      }
+      return res.status(502).json(payload);
+    }
+
+    const hasAny = chunkTests.length > 0;
+    const docs = { data: hasAny, tests: chunkTests };
+    const payload = {
+      docs,
+      chunkIndex: safeIndex,
+      totalChunks,
+      chunkSize,
+      estimatedTotalTestsInReport,
+      estimatedTotalTestsInChunk
+    };
+    if (debugAi) {
+      payload.debug = {
+        provider,
+        extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
+        chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
+        pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
+        docxTextLength: typeof docxText === "string" ? docxText.length : 0,
+        imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
+        extractedTests: chunkTests.length,
+        aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null,
+        aiIncomingTests: aiIncoming.length,
+        heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0,
+        windows: windows.length
+      };
+    }
+    res.json(payload);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post("/docs-tests-excel", upload.none(), async (req, res) => {
+  try {
+    const raw = req?.body?.testsJson;
+    if (!requireString(raw)) {
+      return res.status(400).json({ error: "testsJson is required" });
+    }
+
+    const parsedObject = safeParseJsonObject(raw);
+    const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
+    const normalized =
+      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
+
+    const buffer = await buildDocsTestsExcelBuffer(normalized);
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", 'attachment; filename="docs-tests.xlsx"');
+    res.send(buffer);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post(
   "/heart-analysis",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -2285,6 +3382,8 @@ gptRouter.post(
       return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
     }
 
+    const debugAi = process.env.AI_DEBUG === "1";
+
     const uploaded = collectUploadedFiles(req);
     const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
     const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
@@ -2308,26 +3407,78 @@ gptRouter.post(
     const extractedText = `${pdfText}${docxText}`;
 
     if (!requireString(extractedText)) {
+      if (provider === "claude" && imageFiles.length === 0) {
+        return res.status(400).json({
+          error:
+            "Claude could not extract tests because this PDF has no readable text. Please upload images (JPG/PNG) of the report pages or use GPT for scanned PDFs."
+        });
+      }
       const blood = { data: false, tests: [] };
-      return res.json({ blood, chunkIndex: 0, totalChunks: 1, chunkSize: 1, hasMore: false });
+      const payload = { blood, chunkIndex: 0, totalChunks: 1, chunkSize: 1, hasMore: false };
+      if (debugAi) {
+        payload.debug = {
+          provider,
+          extractedTextLength: 0,
+          chunkTextLength: 0,
+          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
+          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
+          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0
+        };
+      }
+      return res.json(payload);
     }
 
     const { safeIndex, totalChunks, chunkText, chunkSize } = sliceTextFixed(extractedText, chunkIndex, 4);
 
-    const incoming =
+    const extraction =
       imageFiles.length > 0
         ? await extractAllBloodParametersFromImagesAndText({
           openai,
           imageFiles,
           extractedText: chunkText,
-          provider
+          provider,
+          debug: debugAi
         })
-        : await extractAllBloodParametersFromText({ openai, extractedText: chunkText, provider });
+        : await extractAllBloodParametersFromText({ openai, extractedText: chunkText, provider, debug: debugAi });
 
-    const merged = mergeTestEntries([], Array.isArray(incoming) ? incoming : []);
+    const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
+    const merged = mergeTestEntries([], incomingTests);
+    if (provider === "claude" && merged.length === 0) {
+      const raw = typeof extraction?.raw === "string" ? extraction.raw : "";
+      const payload = {
+        error:
+          "Claude returned no parsable tests for this chunk. This usually happens when the response was truncated or not valid JSON. Enable AI_DEBUG=1 to see the response preview, or try the next chunk / use images."
+      };
+      if (debugAi) {
+        payload.debug = {
+          provider,
+          extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
+          chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
+          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
+          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
+          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
+          aiResponsePreview: raw ? raw.slice(0, 2000) : null
+        };
+      }
+      return res.status(502).json(payload);
+    }
     const hasAny = merged.length > 0;
     const blood = { data: hasAny, tests: merged };
-    res.json({ blood, chunkIndex: safeIndex, totalChunks, chunkSize, hasMore: safeIndex + 1 < totalChunks });
+    const payload = { blood, chunkIndex: safeIndex, totalChunks, chunkSize, hasMore: safeIndex + 1 < totalChunks };
+    if (debugAi) {
+      const raw = typeof extraction?.raw === "string" ? extraction.raw : "";
+      payload.debug = {
+        provider,
+        extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
+        chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
+        pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
+        docxTextLength: typeof docxText === "string" ? docxText.length : 0,
+        imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
+        extractedTests: merged.length,
+        aiResponsePreview: raw ? raw.slice(0, 2000) : null
+      };
+    }
+    res.json(payload);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
