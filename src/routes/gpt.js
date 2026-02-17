@@ -3156,8 +3156,11 @@ gptRouter.post(
     );
     const estimatedTotalTestsInChunk = estimateTotalTestsInReportText(chunkText);
 
+    const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
     const aiIncoming = [];
     let lastRaw = "";
+    const shouldUseAi = imageFiles.length > 0 || (requireString(extractedText) && heuristicTests.length < 30);
+
     if (imageFiles.length > 0) {
       const extraction = await extractDocsTestsFromImagesAndText({
         openai,
@@ -3169,7 +3172,7 @@ gptRouter.post(
       lastRaw = typeof extraction?.raw === "string" ? extraction.raw : "";
       const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
       aiIncoming.push(...incomingTests);
-    } else {
+    } else if (shouldUseAi) {
       const extraction = await extractDocsTestsFromText({
         openai,
         extractedText: chunkText,
@@ -3181,8 +3184,7 @@ gptRouter.post(
       aiIncoming.push(...incomingTests);
     }
 
-    const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
-    const merged = mergeTestEntries(aiIncoming, heuristicTests);
+    const merged = aiIncoming.length > 0 ? mergeTestEntries(aiIncoming, heuristicTests) : heuristicTests;
     const chunkTests = merged.filter((t) => toNullOrString(t?.value) != null);
 
     if (provider === "claude" && chunkTests.length === 0) {
@@ -3225,7 +3227,8 @@ gptRouter.post(
         extractedTests: chunkTests.length,
         aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null,
         aiIncomingTests: aiIncoming.length,
-        heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0
+        heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0,
+        usedAi: aiIncoming.length > 0
       };
     }
     res.json(payload);
