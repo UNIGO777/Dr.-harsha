@@ -3156,7 +3156,6 @@ gptRouter.post(
     );
     const estimatedTotalTestsInChunk = estimateTotalTestsInReportText(chunkText);
 
-    const windows = splitTextWindows(chunkText, 12000, 600, 8);
     const aiIncoming = [];
     let lastRaw = "";
     if (imageFiles.length > 0) {
@@ -3170,18 +3169,16 @@ gptRouter.post(
       lastRaw = typeof extraction?.raw === "string" ? extraction.raw : "";
       const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
       aiIncoming.push(...incomingTests);
-    } else if (windows.length > 0) {
-      for (const w of windows) {
-        const extraction = await extractDocsTestsFromText({
-          openai,
-          extractedText: w,
-          provider,
-          debug: debugAi
-        });
-        lastRaw = typeof extraction?.raw === "string" ? extraction.raw : lastRaw;
-        const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
-        aiIncoming.push(...incomingTests);
-      }
+    } else {
+      const extraction = await extractDocsTestsFromText({
+        openai,
+        extractedText: chunkText,
+        provider,
+        debug: debugAi
+      });
+      lastRaw = typeof extraction?.raw === "string" ? extraction.raw : "";
+      const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
+      aiIncoming.push(...incomingTests);
     }
 
     const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
@@ -3228,8 +3225,7 @@ gptRouter.post(
         extractedTests: chunkTests.length,
         aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null,
         aiIncomingTests: aiIncoming.length,
-        heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0,
-        windows: windows.length
+        heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0
       };
     }
     res.json(payload);
