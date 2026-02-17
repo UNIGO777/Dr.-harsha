@@ -121,6 +121,11 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT) || 3000;
 
-app.listen(port, "0.0.0.0", () => {
+const server = app.listen(port, "0.0.0.0", () => {
   console.log(`API listening on http://localhost:${port}`);
 });
+
+const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+server.setTimeout(REQUEST_TIMEOUT_MS);
+server.requestTimeout = REQUEST_TIMEOUT_MS;
+server.headersTimeout = REQUEST_TIMEOUT_MS + 10 * 1000;
