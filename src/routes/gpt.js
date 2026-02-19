@@ -367,6 +367,20 @@ function heuristicExtractDocsTestsFromText(extractedText) {
   const text = typeof extractedText === "string" ? extractedText : "";
   if (!text.trim()) return [];
 
+  const addressKeywordRegex =
+    /\b(floor|flr|block|layout|phase|road|rd\.?|street|st\.?|sector|nagar|nag\.?|jp\s*nagar|bangalore|bengaluru|karnataka|india|pincode|pin\s*code|zip|district|state)\b/i;
+
+  const looksLikeAddressLine = (line) => {
+    const l = String(line ?? "").trim();
+    if (!l) return false;
+    const hasAddressKeyword = addressKeywordRegex.test(l);
+    const hasPinLike = /\b[0-9]{5,6}\b/.test(l);
+    const commaCount = (l.match(/,/g) || []).length;
+    if (hasAddressKeyword && (commaCount >= 1 || hasPinLike)) return true;
+    if (hasPinLike && commaCount >= 2) return true;
+    return false;
+  };
+
   const normalizedText = text
     .replace(/([A-Za-zµμ/%])([0-9])/g, "$1 $2")
     .replace(/([0-9])([A-Za-zµμ/%])/g, "$1 $2")
@@ -424,6 +438,7 @@ function heuristicExtractDocsTestsFromText(extractedText) {
     const l = String(line ?? "").trim();
     if (!l) return true;
     if (l.length < 3 || l.length > 240) return true;
+    if (looksLikeAddressLine(l)) return true;
     const lower = l.toLowerCase();
     if (lower.startsWith("page ")) return true;
     if (lower.includes("reference range") && lower.length < 50) return true;
@@ -441,12 +456,14 @@ function heuristicExtractDocsTestsFromText(extractedText) {
   const out = [];
   const seen = new Set();
   for (const line of lines) {
+    if (looksLikeAddressLine(line)) continue;
+
     const hasColon = line.includes(":") && !line.includes("http");
     if (hasColon) {
       const idx = line.indexOf(":");
       const name = line.slice(0, idx).trim();
       const tail = line.slice(idx + 1).trim();
-      if (name && looksLikeValue(tail)) {
+      if (name && looksLikeValue(tail) && !looksLikeAddressLine(name) && !looksLikeAddressLine(tail)) {
         const key = `${name.toLowerCase()}|${tail.toLowerCase()}`;
         if (!seen.has(key)) {
           seen.add(key);
@@ -497,10 +514,12 @@ function heuristicExtractDocsTestsFromText(extractedText) {
     while (nameTokens.length > 0 && isTechToken(nameTokens[0])) nameTokens.shift();
     const testName = nameTokens.join(" ").trim();
     if (!requireString(testName) || !/[a-z]/i.test(testName)) continue;
+    if (looksLikeAddressLine(testName)) continue;
 
     let referenceRange = null;
     const rangeCandidates = tokens.filter((t) => looksLikeRange(t));
     if (rangeCandidates.length > 0) referenceRange = rangeCandidates[0];
+    if (!unit && !referenceRange && looksLikeAddressLine(line)) continue;
 
     const key = `${testName.toLowerCase()}|${String(value).toLowerCase()}|${String(unit ?? "").toLowerCase()}|${String(referenceRange ?? "").toLowerCase()}`;
     if (seen.has(key)) continue;
@@ -1067,6 +1086,18 @@ const PARAMETER_TESTS = (() => {
   }
 })();
 
+const PARAMETER_TESTS_CANON = new Set(PARAMETER_TESTS.map(canonicalizeTestName));
+const PARAMETER_TESTS_PREFERRED = (() => {
+  const map = new Map();
+  for (const name of PARAMETER_TESTS) {
+    const key = canonicalizeTestName(name);
+    if (!key) continue;
+    const prev = map.get(key);
+    if (!prev || String(name).length < String(prev).length) map.set(key, name);
+  }
+  return map;
+})();
+
 function isHeartParameterTestName(name) {
   const u = String(name || "").toUpperCase();
   if (!u) return false;
@@ -1234,7 +1265,15 @@ const OTHER_ANALYSIS_EXTRACT_TESTS = (() => {
   return uniqueTestNames(list);
 })();
 
-const ALLOWED_STATUSES = new Set(["LOW", "HIGH", "NORMAL", "NOT_PRESENTED", "NOT_FOUND"]);
+const ALLOWED_STATUSES = new Set([
+  "LOW",
+  "HIGH",
+  "NORMAL",
+  "ABSENT",
+  "PRESENT",
+  "NOT_PRESENTED",
+  "NOT_FOUND"
+]);
 
 function toNullOrString(value) {
   if (value == null) return null;
@@ -1354,7 +1393,10 @@ async function buildDocsTestsExcelBuffer(tests) {
 
   const safeTests = (Array.isArray(tests) ? tests.map(normalize) : []).filter((t) => t.value != null);
 
-  const normal = safeTests.filter((t) => String(t.status).toUpperCase() === "NORMAL");
+  const normal = safeTests.filter((t) => {
+    const s = String(t.status).toUpperCase();
+    return s === "NORMAL" || s === "ABSENT" || s === "PRESENT";
+  });
   const high = safeTests.filter((t) => String(t.status).toUpperCase() === "HIGH");
   const low = safeTests.filter((t) => String(t.status).toUpperCase() === "LOW");
 
@@ -1677,6 +1719,273 @@ function mergeTestEntries(existing, incoming) {
   return Array.from(map.values());
 }
 
+function filterDocsTestsToMedicalOnly(tests) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (list.length === 0) return [];
+
+  const addressKeywordRegex =
+    /\b(floor|flr|block|layout|phase|road|rd\.?|street|st\.?|sector|nagar|nag\.?|jp\s*nagar|bangalore|bengaluru|karnataka|india|pincode|pin\s*code|zip|district|state)\b/i;
+  const looksLikeAddress = (s) => {
+    const v = String(s ?? "").trim();
+    if (!v) return false;
+    const hasAddressKeyword = addressKeywordRegex.test(v);
+    const hasPinLike = /\b[0-9]{5,6}\b/.test(v);
+    const commaCount = (v.match(/,/g) || []).length;
+    if (hasAddressKeyword && (commaCount >= 1 || hasPinLike)) return true;
+    if (hasPinLike && commaCount >= 2) return true;
+    return false;
+  };
+
+  const looksLikeMeaninglessValue = (value) => {
+    const v = String(value ?? "").trim();
+    if (!v) return true;
+    if (/^[0-9]{1,3}$/.test(v)) return true;
+    if (/^[0-9]{5,6}$/.test(v)) return true;
+    return false;
+  };
+
+  const keep = [];
+  for (const t of list) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
+    const testName = toNullOrString(t?.testName);
+    const value = toNullOrString(t?.value);
+    if (!testName || !value) continue;
+
+    if (looksLikeAddress(testName) || looksLikeAddress(value)) continue;
+
+    const unit = toNullOrString(t?.unit);
+    const referenceRange = toNullOrString(t?.referenceRange);
+    const section = toNullOrString(t?.section);
+    const remarks = toNullOrString(t?.remarks);
+
+    const canon = canonicalizeTestName(testName);
+    const inDictionary = canon ? PARAMETER_TESTS_CANON.has(canon) : false;
+
+    const hasLabSignals = Boolean(unit || referenceRange || section || remarks);
+    if (!inDictionary && !hasLabSignals && looksLikeMeaninglessValue(value)) continue;
+
+    keep.push(t);
+  }
+  return keep;
+}
+
+function looksLikeInterpretationTestName(name) {
+  const raw = String(name ?? "").trim();
+  if (!raw) return true;
+  const s = raw.toLowerCase();
+  if (["normal", "below", "above", "or higher", "to", "c values", "c value"].includes(s)) return true;
+  if (/\bprediab(et)?ic\b/i.test(raw)) return true;
+  if (/\bunsatisfactory\b/i.test(raw)) return true;
+  if (/\b(good|fair|poor)\s+control\b/i.test(raw)) return true;
+  if (/\bcontrol\b/i.test(raw) && !/\bquality\s*control\b/i.test(raw)) return true;
+  if (/\b(range|ranges)\b/i.test(raw) && /\b(mg\/dl|mmol\/l|%)\b/i.test(raw)) return true;
+  if (/^\s*(to|or)\b/i.test(raw) && /\b(mg\/dl|mmol\/l|%)\b/i.test(raw)) return true;
+  if (/^\s*\d+(\.\d+)?\s*(mg\/dl|mmol\/l|%)?\s*(to|\-)\s*\d+(\.\d+)?/i.test(raw)) return true;
+  if (/^\s*\d+(\.\d+)?\s*(mg\/dl|mmol\/l|%)\s*$/i.test(raw)) return true;
+  return false;
+}
+
+function filterDocsTestsToMedicalTestsNoInterpretation(tests) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (list.length === 0) return [];
+
+  const addressKeywordRegex =
+    /\b(floor|flr|block|layout|phase|road|rd\.?|street|st\.?|sector|nagar|nag\.?|jp\s*nagar|bangalore|bengaluru|karnataka|india|pincode|pin\s*code|zip|district|state)\b/i;
+  const looksLikeAddress = (s) => {
+    const v = String(s ?? "").trim();
+    if (!v) return false;
+    const hasAddressKeyword = addressKeywordRegex.test(v);
+    const hasPinLike = /\b[0-9]{5,6}\b/.test(v);
+    const commaCount = (v.match(/,/g) || []).length;
+    if (hasAddressKeyword && (commaCount >= 1 || hasPinLike)) return true;
+    if (hasPinLike && commaCount >= 2) return true;
+    return false;
+  };
+
+  const looksLikeMeaninglessValue = (value) => {
+    const v = String(value ?? "").trim();
+    if (!v) return true;
+    if (/^[0-9]{1,3}$/.test(v)) return true;
+    if (/^[0-9]{5,6}$/.test(v)) return true;
+    return false;
+  };
+
+  const looksMedicalEnoughWithoutDictionary = (t) => {
+    const testName = String(t?.testName ?? "").trim();
+    const unit = String(t?.unit ?? "").trim();
+    const referenceRange = String(t?.referenceRange ?? "").trim();
+    const section = String(t?.section ?? "").trim();
+    const remarks = String(t?.remarks ?? "").trim();
+    const hasLabSignals = Boolean(unit || referenceRange || section || remarks);
+    if (hasLabSignals) return true;
+    const nameHasMedicalKeywords =
+      /\b(glucose|sugar|hba1c|hemoglobin|cholesterol|triglycer|ldl|hdl|vldl|bilirubin|sgot|sgpt|ast|alt|alkaline|alp|urea|creatinine|uric|sodium|potassium|chloride|calcium|magnesium|phosph|tsh|t3|t4|vitamin|b12|d3|ferritin|iron|crp|esr|cbc|wbc|rbc|platelet|neutrophil|lymphocyte|monocyte|eosinophil|basophil|urine|urin|albumin|protein|globulin|a\/g|ratio|hct|mcv|mch|mchc|rdw)\b/i.test(
+        testName
+      );
+    if (!nameHasMedicalKeywords) return false;
+    if (looksLikeMeaninglessValue(t?.value)) return false;
+    return true;
+  };
+
+  const keep = [];
+  for (const t of list) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
+    const testName = toNullOrString(t?.testName);
+    const value = toNullOrString(t?.value);
+    if (!testName || !value) continue;
+
+    if (looksLikeAddress(testName) || looksLikeAddress(value)) continue;
+    if (looksLikeInterpretationTestName(testName)) continue;
+
+    const canon = canonicalizeTestName(testName);
+    const inDictionary = canon ? PARAMETER_TESTS_CANON.has(canon) : false;
+    if (inDictionary) {
+      keep.push(t);
+      continue;
+    }
+
+    if (looksMedicalEnoughWithoutDictionary(t)) keep.push(t);
+  }
+  return keep;
+}
+
+function normalizeCleanerStatus(status, value) {
+  const v = requireString(value) ? String(value).trim().toUpperCase() : "";
+  const s = requireString(status) ? String(status).trim().toUpperCase() : "";
+  if (v === "ABSENT" || s === "ABSENT") return "ABSENT";
+  if (v === "PRESENT" || s === "PRESENT") return "PRESENT";
+  if (s === "HIGH") return "HIGH";
+  if (s === "LOW") return "LOW";
+  return "NORMAL";
+}
+
+async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (list.length === 0) return { tests: [] };
+
+  const dictionaryText = bulletList(PARAMETER_TESTS);
+  const dictionaryPrompt = capTextForPrompt(dictionaryText, 12000);
+  const rowsJson = JSON.stringify(
+    list.map((t) => ({
+      testName: toNullOrString(t?.testName),
+      value: toNullOrString(t?.value),
+      unit: toNullOrString(t?.unit),
+      referenceRange: toNullOrString(t?.referenceRange),
+      status: toNullOrString(t?.status),
+      section: toNullOrString(t?.section),
+      page: typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null,
+      remarks: toNullOrString(t?.remarks)
+    }))
+  );
+  const rowsForPrompt = capTextForPrompt(rowsJson, 20000);
+
+  const systemPrompt = `You are a medical report data cleaner and extractor.
+
+Return ONLY valid JSON.
+Do not return explanations.
+Do not return markdown.
+Do not add extra fields.`;
+
+  const userPrompt = `Input: Raw OCR/text extracted from a lab report table (may contain noise, descriptions, broken rows, and mixed urine/blood tests).
+
+Your job:
+- Identify and extract ONLY real medical test entries (lab parameters).
+- Clean and normalize the data.
+- Remove explanatory paragraphs and irrelevant text.
+- Standardize status values (Normal, High, Low, Absent, Present).
+- Keep the original numeric value and unit exactly as given.
+- If the result says "ABSENT", store result as "Absent".
+- Drop rows that are NOT medical tests (interpretation / classification / ranges / labels / address blocks).
+- Examples of rows to DROP: "Normal", "Prediabetic", "Good Control", "Fair Control", "Unsatisfactory Control", "c values", "to 125 mg/dl", "or higher", and pure range/category lines.
+- Keep medical parameters even if they are not in the dictionary, as long as they are clearly medical (have unit/referenceRange/section/remarks or are common lab parameters).
+- Test name normalization is critical:
+  - Replace long/verbose titles with a concise industry-standard test name.
+  - Do NOT include units, reference ranges, or extra explanatory words inside testName.
+  - Prefer 1–3 words when possible, but if the industry-standard name is longer, keep the standard name.
+  - If the test exists in the dictionary, set testName to EXACTLY one of the dictionary test names (copy spelling as-is) and pick the shortest standard variant.
+  - If the test does not exist in the dictionary, keep the original testName unchanged (do not invent a new name).
+
+Medical dictionary (valid test names):
+${dictionaryPrompt}
+
+Input rows (JSON array):
+${rowsForPrompt}
+
+Return clean JSON ONLY with this structure:
+{
+  "tests": [
+    {
+      "testName": string,
+      "value": string,
+      "unit": string|null,
+      "referenceRange": string|null,
+      "status": "Normal"|"High"|"Low"|"Absent"|"Present",
+      "section": string|null,
+      "page": number|null,
+      "remarks": string|null
+    }
+  ]
+}`;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let content = "";
+  if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: userPrompt }]
+        }
+      ],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    content = getTextFromAnthropicMessageResponse(response);
+  } else {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "user", content: userPrompt }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  let parsed =
+    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ??
+    safeParseJsonArrayLoose(content) ??
+    null;
+
+  if (!parsed && resolvedProvider === "claude") {
+    parsed = await repairJsonObjectWithClaude({
+      rawText: content,
+      schemaHint: `Schema: {"tests":[{"testName":"","value":"","unit":null,"referenceRange":null,"status":"","section":null,"page":null,"remarks":null}]}`,
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
+    });
+  }
+
+  const cleaned = normalizeLooseIncomingTests(parsed ?? {});
+  const normalized = cleaned.map((t) => ({
+    ...t,
+    status: normalizeCleanerStatus(t?.status, t?.value),
+    testName: (() => {
+      const raw = toNullOrString(t?.testName);
+      if (!raw) return raw;
+      const key = canonicalizeTestName(raw);
+      const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
+      return preferred ?? raw;
+    })()
+  }));
+  const filtered = filterDocsTestsToMedicalTestsNoInterpretation(normalized);
+  if (debug) return { tests: filtered, raw: content };
+  return { tests: filtered };
+}
+
 async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames, provider }) {
   const systemPrompt = `You are a medical report extraction engine.
 
@@ -1899,13 +2208,21 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
   if (resolvedProvider === "claude") {
     const maybeTests = normalizeLooseIncomingTests(parsedJson ?? {});
     if (maybeTests.length === 0) {
-      const fallbackUserPrompt = `Extract lab parameter rows from the report text.
+      const fallbackUserPrompt = `Extract ONLY medical test / lab parameter rows from the report text.
+
+Hard exclusions (do NOT extract these even if they contain numbers):
+- Patient address, phone, email, name, age, gender
+- Lab / hospital address, doctor address, billing details
+- IDs (patient id, sample id, barcode), page headers/footers
+- Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
 
 Rules:
-- Extract ONLY line-items that have an observed value.
+- Extract ONLY line-items that are clearly medical test parameters (analytes, hormones, antibodies, ratios, urinalysis line-items, etc).
+- Each extracted row MUST have an observed value for the parameter.
+- Ignore serial numbers / row indices.
+- If unit/referenceRange/section/page/remarks are missing, set them to null.
+- If you are unsure whether a row is a medical test, exclude it.
 - Keep value text exactly as written.
-- Return at least 20 items if present.
-- Return at most 80 items.
 
 Return JSON only:
 {
@@ -1955,22 +2272,31 @@ Do not add extra fields.
 Do not hallucinate.
 Extract values exactly as written in the report.`;
 
-  const userPrompt = `Read the PDF page by page systematically
-Extract every single parameter (ratios, physical exam, microscopy)
-Self-audit before writing (page count check, status verification, count check)
-Run a quality checklist before delivering
+  const userPrompt = `Read the report text systematically (in order), like reading the PDF page-by-page.
 
-Rules:
-- Extract ONLY parameters that are present with an observed value and related to any medical test.
+Goal:
+- Extract ONLY medical test / lab parameter results that are present in the document (blood tests, biochemistry, immunology, hormones, urinalysis, ratios, etc).
+
+Hard exclusions (do NOT extract these even if they contain numbers):
+- Patient details: name, age, sex, address, phone, email
+- Lab/hospital address, branch address, doctor address
+- IDs: patient id, sample id, barcode, accession no, bill no
+- Dates/times, page headers/footers, reference text blocks that are not results
+- Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
+
+Row validity rules:
+- Each extracted row must be a real medical parameter/test name (use your medical knowledge as a dictionary).
+- Each row MUST have an observed value for that parameter.
+- Ignore serial numbers / row indices.
 - Do NOT invent missing tests.
 - Keep the observed value text exactly as written.
 - If unit/referenceRange/section/page/remarks are missing, set them to null.
-- Do NOT skip any row in any table. Extract every line-item, even long names (e.g. "Total Iron Binding Capacity (TIBC)").
-- Prefer one row per parameter occurrence; dedupe only exact duplicates.
+- If you are unsure whether a row is a medical test, exclude it.
 
-Important output constraint:
-- Keep output compact to avoid truncation.
-- Return all the tests that are present with an observed value and related to any medical test.
+Self-audit before returning JSON:
+- Remove any non-medical rows (especially addresses/IDs).
+- Double-check that each value is copied exactly from the report text.
+- Verify LOW/HIGH is only set when supported by referenceRange.
 
 Return ONLY valid JSON with this structure (no extra wrapper text):
 {
@@ -2073,23 +2399,32 @@ Do not add extra fields.
 Do not hallucinate.
 Extract values exactly as written in the report.`;
 
-  const userPrompt = `Read the PDF page by page systematically
-Extract every single parameter (ratios, physical exam, microscopy, remarks — everything)
-Self-audit before writing (page count check, status verification, count check)
-Build the 3-sheet color-coded Excel automatically
-Run a quality checklist before delivering
+  const userPrompt = `Read the report page-by-page from the images (and extracted text) carefully.
 
-Rules:
-- Extract ONLY parameters that are present with an observed value and related to any medical test.
+Goal:
+- Extract ONLY medical test / lab parameter results that are present in the document (blood tests, biochemistry, immunology, hormones, urinalysis, ratios, etc).
+
+Hard exclusions (do NOT extract these even if they contain numbers):
+- Patient details: name, age, sex, address, phone, email
+- Lab/hospital address, branch address, doctor address
+- IDs: patient id, sample id, barcode, accession no, bill no
+- Dates/times, page headers/footers, reference text blocks that are not results
+- Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
+
+Row validity rules:
+- Each extracted row must be a real medical parameter/test name (use your medical knowledge as a dictionary).
+- Each row MUST have an observed value for that parameter.
+- Ignore serial numbers / row indices.
 - Do NOT invent missing tests.
 - Keep the observed value text exactly as written.
 - If unit/referenceRange/section/page/remarks are missing, set them to null.
-- Do NOT skip any row in any table. Extract every line-item, even long names (e.g. "Total Iron Binding Capacity (TIBC)").
-- Prefer one row per parameter occurrence; dedupe only exact duplicates.
+- Do NOT skip any row in any RESULTS table.
+- If you are unsure whether a row is a medical test, exclude it.
 
-Important output constraint:
-- Keep output compact to avoid truncation.
-- Return all the tests that are present with an observed value and related to any medical test.
+Self-audit before returning JSON:
+- Remove any non-medical rows (especially addresses/IDs).
+- Double-check that each value is copied exactly from the report.
+- Verify LOW/HIGH is only set when supported by referenceRange.
 
 Return ONLY valid JSON with this structure (no extra wrapper text):
 {
@@ -2880,10 +3215,10 @@ gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, 
       '      "leftLeg": { "kg": number|null, "pct": number|null }',
       "    },",
       '    "segmentalMuscle": {',
-      '      "rightArmKg": number|null, "leftArmKg": number|null, "trunkKg": number|null, "rightLegKg": number|null, "leftLegKg": number|null',
+      '      "rightArmKg": number|null, "rightArmPct": number|null, "leftArmKg": number|null, "leftArmPct": number|null, "trunkKg": number|null, "trunkPct": number|null, "rightLegKg": number|null, "rightLegPct": number|null, "leftLegKg": number|null, "leftLegPct": number|null',
       "    },",
       '    "segmentalFat": {',
-      '      "rightArmKg": number|null, "leftArmKg": number|null, "trunkKg": number|null, "rightLegKg": number|null, "leftLegKg": number|null',
+      '      "rightArmKg": number|null, "rightArmPct": number|null, "leftArmKg": number|null, "leftArmPct": number|null, "trunkKg": number|null, "trunkPct": number|null, "rightLegKg": number|null, "rightLegPct": number|null, "leftLegKg": number|null, "leftLegPct": number|null',
       "    },",
       '    "research": { "basalMetabolicRateKcal": number|null, "visceralFatArea": number|null },',
       '    "impedance": {',
@@ -3188,8 +3523,9 @@ gptRouter.post(
     const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
     const merged = mergeTestEntries(aiIncoming, heuristicTests);
     const chunkTests = merged.filter((t) => toNullOrString(t?.value) != null);
+    const filteredChunkTests = filterDocsTestsToMedicalOnly(chunkTests);
 
-    if (provider === "claude" && chunkTests.length === 0) {
+    if (provider === "claude" && filteredChunkTests.length === 0) {
       const payload = {
         error:
           "Claude returned no parsable tests for this chunk. This usually happens when the response was truncated or not valid JSON. Enable AI_DEBUG=1 to see the response preview, or try the next chunk / use images."
@@ -3208,8 +3544,8 @@ gptRouter.post(
       return res.status(502).json(payload);
     }
 
-    const hasAny = chunkTests.length > 0;
-    const docs = { data: hasAny, tests: chunkTests };
+    const hasAny = filteredChunkTests.length > 0;
+    const docs = { data: hasAny, tests: filteredChunkTests };
     const payload = {
       docs,
       chunkIndex: safeIndex,
@@ -3226,13 +3562,52 @@ gptRouter.post(
         pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
         docxTextLength: typeof docxText === "string" ? docxText.length : 0,
         imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
-        extractedTests: chunkTests.length,
+        extractedTests: filteredChunkTests.length,
         aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null,
         aiIncomingTests: aiIncoming.length,
         heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0,
         windows: windows.length
       };
     }
+    res.json(payload);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
+gptRouter.post("/docs-tests-clean", upload.none(), async (req, res) => {
+  try {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
+    }
+
+    const raw = req?.body?.testsJson;
+    if (!requireString(raw)) {
+      return res.status(400).json({ error: "testsJson is required" });
+    }
+
+    const debugAi = process.env.AI_DEBUG === "1";
+    const parsedObject = safeParseJsonObject(raw);
+    const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
+    const normalized =
+      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
+
+    const cleaned = await cleanDocsTestsWithAi({
+      openai,
+      provider,
+      tests: normalized,
+      debug: debugAi
+    });
+
+    const tests = Array.isArray(cleaned?.tests) ? cleaned.tests : [];
+    const payload = { tests };
+    if (debugAi) payload.raw = typeof cleaned?.raw === "string" ? cleaned.raw : null;
     res.json(payload);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -3252,7 +3627,14 @@ gptRouter.post("/docs-tests-excel", upload.none(), async (req, res) => {
     const normalized =
       Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
 
-    const buffer = await buildDocsTestsExcelBuffer(normalized);
+    const standardized = normalized.map((t) => {
+      const name = toNullOrString(t?.testName);
+      if (!name) return t;
+      const key = canonicalizeTestName(name);
+      const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
+      return { ...t, testName: preferred ?? name };
+    });
+    const buffer = await buildDocsTestsExcelBuffer(standardized);
 
     res.setHeader(
       "Content-Type",
