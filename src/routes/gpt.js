@@ -1572,6 +1572,31 @@ function normalizeIncomingTests(incoming) {
     .filter(Boolean);
 }
 
+function flattenDocsTestsIncoming(incoming) {
+  const pickArray = (value) => (Array.isArray(value) ? value : []);
+  if (Array.isArray(incoming)) return incoming;
+  if (!incoming || typeof incoming !== "object") return [];
+
+  const out = [];
+  const candidates = [
+    ...pickArray(incoming?.tests),
+    ...pickArray(incoming?.parameters),
+    ...pickArray(incoming?.items),
+    ...pickArray(incoming?.results),
+    ...pickArray(incoming?.rows),
+    ...pickArray(incoming?.data)
+  ];
+
+  for (const entry of candidates) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const grouped = pickArray(entry?.Tests).length > 0 ? entry?.Tests : pickArray(entry?.tests).length > 0 ? entry?.tests : null;
+    if (grouped) out.push(...pickArray(grouped));
+    else out.push(entry);
+  }
+
+  return out;
+}
+
 function normalizeDocsTestsIncoming(incoming) {
   const pickArray = (value) => (Array.isArray(value) ? value : []);
   const candidates = [
@@ -1605,6 +1630,91 @@ function normalizeDocsTestsIncoming(incoming) {
       return { testName, value, unit, referenceRange };
     })
     .filter(Boolean);
+}
+
+function normalizeCategoryName(name) {
+  const raw = String(name ?? "").trim();
+  if (!raw) return "Other Tests";
+  return raw
+    .replace(/\s+/g, " ")
+    .replace(/^\w/, (c) => c.toUpperCase());
+}
+
+function inferDocsTestsCategoryName(testName) {
+  const u = String(testName ?? "").toUpperCase();
+  if (!u) return "Other Tests";
+
+  const has = (regex) => regex.test(u);
+
+  if (has(/\b(URINE|URINARY|URINOGRAM)\b/)) return "Urinalysis";
+  if (has(/\b(TSH|T3|T4|FT3|FT4|THYROID)\b/)) return "Thyroid Profile";
+  if (has(/\b(HBA1C|HB A1C|GLUCOSE|SUGAR|INSULIN|FRUCTOSAMINE)\b/)) return "Diabetes";
+  if (has(/\b(CHOL|CHOLESTEROL|HDL|LDL|TRIGLYCERIDE|TRIGLYCERIDES|VLDL|NON[- ]HDL|APOLIPOPROTEIN|APO|LIPOPROTEIN)\b/))
+    return "Lipid Profile";
+  if (has(/\b(ALT|SGPT|AST|SGOT|GGT|ALP|ALKALINE PHOSPHATASE|BILIRUBIN|TOTAL PROTEIN|ALBUMIN|GLOBULIN)\b/))
+    return "Liver Function";
+  if (
+    has(
+      /\b(BUN|UREA|CREATININE|EGFR|URIC ACID|SODIUM|POTASSIUM|CHLORIDE|CALCIUM|MAGNESIUM|PHOSPHORUS|PHOSPHATE|BICARBONATE|CO2)\b/
+    )
+  )
+    return "Renal & Electrolyte Profile";
+  if (has(/\b(HEMOGLOBIN|HB\b|RBC|WBC|PLATELET|MCV|MCH|MCHC|RDW|HEMATOCRIT|PCV|NEUTRO|LYMPH|MONO|EOS|BASO)\b/))
+    return "Complete Blood Count";
+  if (has(/\b(IRON|FERRITIN|TIBC|TRANSFERRIN|TSAT|SATURATION)\b/)) return "Iron Studies";
+  if (has(/\b(VITAMIN\s*D|25[- ]OH|B12|FOLATE|ZINC)\b/)) return "Vitamins & Minerals";
+  if (has(/\b(CRP|HS[- ]CRP|HOMOCYSTEINE)\b/)) return "Inflammation";
+  if (has(/\b(TESTOSTERONE|ESTRADIOL|PROLACTIN|LH\b|FSH\b|DHEA|CORTISOL|HORMONE)\b/)) return "Hormones";
+
+  return "Other Tests";
+}
+
+function groupDocsTestsByCategory(tests) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (list.length === 0) return [];
+
+  const priority = new Map([
+    ["Renal & Electrolyte Profile", 1],
+    ["Liver Function", 2],
+    ["Lipid Profile", 3],
+    ["Diabetes", 4],
+    ["Thyroid Profile", 5],
+    ["Complete Blood Count", 6],
+    ["Iron Studies", 7],
+    ["Vitamins & Minerals", 8],
+    ["Inflammation", 9],
+    ["Hormones", 10],
+    ["Urinalysis", 11],
+    ["Other Tests", 99]
+  ]);
+
+  const map = new Map();
+  for (const t of list) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
+    const section = toNullOrString(t?.section);
+    const category = normalizeCategoryName(section ?? inferDocsTestsCategoryName(t?.testName));
+    const prev = map.get(category) ?? [];
+    prev.push(t);
+    map.set(category, prev);
+  }
+
+  const groups = Array.from(map.entries())
+    .map(([CategaryName, Tests]) => ({
+      CategaryName,
+      Tests: (Array.isArray(Tests) ? Tests : []).slice().sort((a, b) => {
+        const an = String(a?.testName ?? "");
+        const bn = String(b?.testName ?? "");
+        return an.localeCompare(bn);
+      })
+    }))
+    .sort((a, b) => {
+      const pa = priority.get(a.CategaryName) ?? 50;
+      const pb = priority.get(b.CategaryName) ?? 50;
+      if (pa !== pb) return pa - pb;
+      return String(a.CategaryName).localeCompare(String(b.CategaryName));
+    });
+
+  return groups;
 }
 
 function normalizeLooseIncomingTests(incoming) {
@@ -3578,37 +3688,17 @@ gptRouter.post(
 
 gptRouter.post("/docs-tests-clean", upload.none(), async (req, res) => {
   try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
     const raw = req?.body?.testsJson;
     if (!requireString(raw)) {
       return res.status(400).json({ error: "testsJson is required" });
     }
 
-    const debugAi = process.env.AI_DEBUG === "1";
     const parsedObject = safeParseJsonObject(raw);
     const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
-    const normalized =
-      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
-
-    const cleaned = await cleanDocsTestsWithAi({
-      openai,
-      provider,
-      tests: normalized,
-      debug: debugAi
-    });
-
-    const tests = Array.isArray(cleaned?.tests) ? cleaned.tests : [];
-    const payload = { tests };
-    if (debugAi) payload.raw = typeof cleaned?.raw === "string" ? cleaned.raw : null;
-    res.json(payload);
+    const flattened = Array.isArray(parsedArray) ? parsedArray : flattenDocsTestsIncoming(parsedObject ?? {});
+    const normalized = normalizeLooseIncomingTests({ tests: flattened });
+    const tests = groupDocsTestsByCategory(normalized);
+    res.json({ tests });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
@@ -3624,8 +3714,8 @@ gptRouter.post("/docs-tests-excel", upload.none(), async (req, res) => {
 
     const parsedObject = safeParseJsonObject(raw);
     const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
-    const normalized =
-      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
+    const flattened = Array.isArray(parsedArray) ? parsedArray : flattenDocsTestsIncoming(parsedObject ?? {});
+    const normalized = normalizeLooseIncomingTests({ tests: flattened });
 
     const standardized = normalized.map((t) => {
       const name = toNullOrString(t?.testName);
