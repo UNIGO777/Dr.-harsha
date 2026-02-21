@@ -470,6 +470,7 @@ function heuristicExtractDocsTestsFromText(extractedText) {
           out.push({
           testName: name,
           value: tail,
+          results: [{ value: tail, dateAndTime: null }],
           unit: null,
           referenceRange: null,
           status: computeStatus({ value: tail, referenceRange: null, fallbackStatus: null }),
@@ -528,6 +529,7 @@ function heuristicExtractDocsTestsFromText(extractedText) {
     out.push({
       testName,
       value,
+      results: [{ value, dateAndTime: null }],
       unit,
       referenceRange,
       status: computeStatus({ value, referenceRange, fallbackStatus: null }),
@@ -1572,31 +1574,6 @@ function normalizeIncomingTests(incoming) {
     .filter(Boolean);
 }
 
-function flattenDocsTestsIncoming(incoming) {
-  const pickArray = (value) => (Array.isArray(value) ? value : []);
-  if (Array.isArray(incoming)) return incoming;
-  if (!incoming || typeof incoming !== "object") return [];
-
-  const out = [];
-  const candidates = [
-    ...pickArray(incoming?.tests),
-    ...pickArray(incoming?.parameters),
-    ...pickArray(incoming?.items),
-    ...pickArray(incoming?.results),
-    ...pickArray(incoming?.rows),
-    ...pickArray(incoming?.data)
-  ];
-
-  for (const entry of candidates) {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-    const grouped = pickArray(entry?.Tests).length > 0 ? entry?.Tests : pickArray(entry?.tests).length > 0 ? entry?.tests : null;
-    if (grouped) out.push(...pickArray(grouped));
-    else out.push(entry);
-  }
-
-  return out;
-}
-
 function normalizeDocsTestsIncoming(incoming) {
   const pickArray = (value) => (Array.isArray(value) ? value : []);
   const candidates = [
@@ -1630,91 +1607,6 @@ function normalizeDocsTestsIncoming(incoming) {
       return { testName, value, unit, referenceRange };
     })
     .filter(Boolean);
-}
-
-function normalizeCategoryName(name) {
-  const raw = String(name ?? "").trim();
-  if (!raw) return "Other Tests";
-  return raw
-    .replace(/\s+/g, " ")
-    .replace(/^\w/, (c) => c.toUpperCase());
-}
-
-function inferDocsTestsCategoryName(testName) {
-  const u = String(testName ?? "").toUpperCase();
-  if (!u) return "Other Tests";
-
-  const has = (regex) => regex.test(u);
-
-  if (has(/\b(URINE|URINARY|URINOGRAM)\b/)) return "Urinalysis";
-  if (has(/\b(TSH|T3|T4|FT3|FT4|THYROID)\b/)) return "Thyroid Profile";
-  if (has(/\b(HBA1C|HB A1C|GLUCOSE|SUGAR|INSULIN|FRUCTOSAMINE)\b/)) return "Diabetes";
-  if (has(/\b(CHOL|CHOLESTEROL|HDL|LDL|TRIGLYCERIDE|TRIGLYCERIDES|VLDL|NON[- ]HDL|APOLIPOPROTEIN|APO|LIPOPROTEIN)\b/))
-    return "Lipid Profile";
-  if (has(/\b(ALT|SGPT|AST|SGOT|GGT|ALP|ALKALINE PHOSPHATASE|BILIRUBIN|TOTAL PROTEIN|ALBUMIN|GLOBULIN)\b/))
-    return "Liver Function";
-  if (
-    has(
-      /\b(BUN|UREA|CREATININE|EGFR|URIC ACID|SODIUM|POTASSIUM|CHLORIDE|CALCIUM|MAGNESIUM|PHOSPHORUS|PHOSPHATE|BICARBONATE|CO2)\b/
-    )
-  )
-    return "Renal & Electrolyte Profile";
-  if (has(/\b(HEMOGLOBIN|HB\b|RBC|WBC|PLATELET|MCV|MCH|MCHC|RDW|HEMATOCRIT|PCV|NEUTRO|LYMPH|MONO|EOS|BASO)\b/))
-    return "Complete Blood Count";
-  if (has(/\b(IRON|FERRITIN|TIBC|TRANSFERRIN|TSAT|SATURATION)\b/)) return "Iron Studies";
-  if (has(/\b(VITAMIN\s*D|25[- ]OH|B12|FOLATE|ZINC)\b/)) return "Vitamins & Minerals";
-  if (has(/\b(CRP|HS[- ]CRP|HOMOCYSTEINE)\b/)) return "Inflammation";
-  if (has(/\b(TESTOSTERONE|ESTRADIOL|PROLACTIN|LH\b|FSH\b|DHEA|CORTISOL|HORMONE)\b/)) return "Hormones";
-
-  return "Other Tests";
-}
-
-function groupDocsTestsByCategory(tests) {
-  const list = Array.isArray(tests) ? tests : [];
-  if (list.length === 0) return [];
-
-  const priority = new Map([
-    ["Renal & Electrolyte Profile", 1],
-    ["Liver Function", 2],
-    ["Lipid Profile", 3],
-    ["Diabetes", 4],
-    ["Thyroid Profile", 5],
-    ["Complete Blood Count", 6],
-    ["Iron Studies", 7],
-    ["Vitamins & Minerals", 8],
-    ["Inflammation", 9],
-    ["Hormones", 10],
-    ["Urinalysis", 11],
-    ["Other Tests", 99]
-  ]);
-
-  const map = new Map();
-  for (const t of list) {
-    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
-    const section = toNullOrString(t?.section);
-    const category = normalizeCategoryName(section ?? inferDocsTestsCategoryName(t?.testName));
-    const prev = map.get(category) ?? [];
-    prev.push(t);
-    map.set(category, prev);
-  }
-
-  const groups = Array.from(map.entries())
-    .map(([CategaryName, Tests]) => ({
-      CategaryName,
-      Tests: (Array.isArray(Tests) ? Tests : []).slice().sort((a, b) => {
-        const an = String(a?.testName ?? "");
-        const bn = String(b?.testName ?? "");
-        return an.localeCompare(bn);
-      })
-    }))
-    .sort((a, b) => {
-      const pa = priority.get(a.CategaryName) ?? 50;
-      const pb = priority.get(b.CategaryName) ?? 50;
-      if (pa !== pb) return pa - pb;
-      return String(a.CategaryName).localeCompare(String(b.CategaryName));
-    });
-
-  return groups;
 }
 
 function normalizeLooseIncomingTests(incoming) {
@@ -1791,7 +1683,46 @@ function normalizeLooseIncomingTests(incoming) {
         toNullOrString(t?.test) ??
         toNullOrString(t?.itemName);
       if (!testName) return null;
-      const value = toNullOrString(t?.value) ?? toNullOrString(t?.observed_value);
+      const normalizeDateTime = (v) => {
+        const s = typeof v === "string" ? v : v == null ? "" : String(v);
+        const trimmed = s.trim();
+        return trimmed ? trimmed : null;
+      };
+
+      const normalizeResults = (value) => {
+        const list = pickArray(value);
+        return list
+          .map((r) => {
+            if (r == null) return null;
+            if (typeof r === "string" || typeof r === "number") {
+              const v = toNullOrString(r);
+              if (!v) return null;
+              return { value: v, dateAndTime: null };
+            }
+            if (typeof r !== "object" || Array.isArray(r)) return null;
+            const v =
+              toNullOrString(r?.value) ??
+              toNullOrString(r?.observed_value) ??
+              toNullOrString(r?.result) ??
+              toNullOrString(r?.reading);
+            if (!v) return null;
+            const dateAndTime =
+              normalizeDateTime(r?.dateAndTime) ??
+              normalizeDateTime(r?.date_time) ??
+              normalizeDateTime(r?.datetime) ??
+              normalizeDateTime(r?.date) ??
+              normalizeDateTime(r?.time) ??
+              null;
+            return { value: v, dateAndTime };
+          })
+          .filter(Boolean);
+      };
+
+      const results = normalizeResults(t?.results ?? t?.Results ?? t?.observations ?? t?.values);
+      const value =
+        toNullOrString(t?.value) ??
+        toNullOrString(t?.observed_value) ??
+        (results.length > 0 ? toNullOrString(results[results.length - 1]?.value) : null);
       const unit = toNullOrString(t?.unit) ?? toNullOrString(t?.units);
       const referenceRange =
         toNullOrString(t?.referenceRange) ?? toNullOrString(t?.reference_range) ?? toNullOrString(t?.range);
@@ -1800,12 +1731,112 @@ function normalizeLooseIncomingTests(incoming) {
       const section = toNullOrString(t?.section);
       const page = typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null;
       const remarks = toNullOrString(t?.remarks);
-      return { testName, value, unit, referenceRange, status: computed, section, page, remarks };
+      return { testName, value, results, unit, referenceRange, status: computed, section, page, remarks };
     })
     .filter(Boolean);
 }
 
+function normalizeCategorizedDocsTestsIncoming(incoming) {
+  const pickArray = (value) => (Array.isArray(value) ? value : []);
+  const candidates = [
+    ...pickArray(incoming?.tests),
+    ...pickArray(incoming?.categories),
+    ...pickArray(incoming?.groups),
+    ...pickArray(incoming?.sections),
+    ...pickArray(incoming?.data)
+  ];
+  const list = Array.isArray(incoming) ? incoming : candidates;
+  const looksGrouped = pickArray(list).some((g) => {
+    if (!g || typeof g !== "object" || Array.isArray(g)) return false;
+    const hasTestsArray =
+      Array.isArray(g?.tests) ||
+      Array.isArray(g?.Tests) ||
+      Array.isArray(g?.items) ||
+      Array.isArray(g?.parameters) ||
+      Array.isArray(g?.rows);
+    const hasName =
+      requireString(g?.categoryName) ||
+      requireString(g?.CategaryName) ||
+      requireString(g?.CategoryName) ||
+      requireString(g?.name) ||
+      requireString(g?.section);
+    return hasTestsArray && hasName;
+  });
+
+  if (looksGrouped) {
+    return pickArray(list)
+      .map((g) => {
+        if (!g || typeof g !== "object" || Array.isArray(g)) return null;
+        const categoryNameRaw =
+          toNullOrString(g?.categoryName) ??
+          toNullOrString(g?.CategaryName) ??
+          toNullOrString(g?.CategoryName) ??
+          toNullOrString(g?.name) ??
+          toNullOrString(g?.section) ??
+          "Other Tests";
+        const categoryName = String(categoryNameRaw).trim() || "Other Tests";
+        const testsIncoming =
+          Array.isArray(g?.tests)
+            ? g.tests
+            : Array.isArray(g?.Tests)
+              ? g.Tests
+              : Array.isArray(g?.items)
+                ? g.items
+                : Array.isArray(g?.parameters)
+                  ? g.parameters
+                  : Array.isArray(g?.rows)
+                    ? g.rows
+                    : [];
+        const tests = normalizeLooseIncomingTests({ tests: testsIncoming });
+        if (tests.length === 0) return null;
+        return { categoryName, tests };
+      })
+      .filter(Boolean);
+  }
+
+  const flat = normalizeLooseIncomingTests(
+    Array.isArray(incoming) ? { tests: incoming } : incoming ?? {}
+  );
+  if (flat.length === 0) return [];
+
+  const map = new Map();
+  for (const t of flat) {
+    const nameRaw = toNullOrString(t?.section) ?? "Other Tests";
+    const categoryName = String(nameRaw).trim() || "Other Tests";
+    const prev = map.get(categoryName) ?? [];
+    prev.push(t);
+    map.set(categoryName, prev);
+  }
+
+  return Array.from(map.entries()).map(([categoryName, tests]) => ({
+    categoryName,
+    tests
+  }));
+}
+
 function mergeTestEntries(existing, incoming) {
+  const normalizeDateKey = (v) => {
+    const s = typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim();
+    return s ? s.toLowerCase() : "";
+  };
+  const mergeResults = (a, b) => {
+    const out = [];
+    const seen = new Set();
+    const push = (r) => {
+      if (!r || typeof r !== "object" || Array.isArray(r)) return;
+      const value = toNullOrString(r?.value);
+      if (!value) return;
+      const dateAndTime = toNullOrString(r?.dateAndTime);
+      const key = `${normalizeDateKey(dateAndTime)}|${String(value).trim().toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ value, dateAndTime: dateAndTime ? String(dateAndTime).trim() : null });
+    };
+    for (const r of Array.isArray(a) ? a : []) push(r);
+    for (const r of Array.isArray(b) ? b : []) push(r);
+    return out;
+  };
+
   const map = new Map();
   for (const t of existing) {
     const key = canonicalizeTestName(t?.testName);
@@ -1821,9 +1852,25 @@ function mergeTestEntries(existing, incoming) {
       map.set(key, t);
       continue;
     }
-    const prevHasValue = toNullOrString(prev?.value) != null;
-    const nextHasValue = toNullOrString(t?.value) != null;
-    if (!prevHasValue && nextHasValue) map.set(key, t);
+    const mergedResults = mergeResults(prev?.results, t?.results);
+    const prevValue = toNullOrString(prev?.value) ?? (mergedResults.length > 0 ? toNullOrString(mergedResults[mergedResults.length - 1]?.value) : null);
+    const nextValue = toNullOrString(t?.value) ?? (mergedResults.length > 0 ? toNullOrString(mergedResults[mergedResults.length - 1]?.value) : null);
+
+    const merged = {
+      ...prev,
+      ...t,
+      results: mergedResults,
+      value: nextValue ?? prevValue ?? null,
+      unit: toNullOrString(t?.unit) ?? toNullOrString(prev?.unit) ?? null,
+      referenceRange: toNullOrString(t?.referenceRange) ?? toNullOrString(prev?.referenceRange) ?? null,
+      section: toNullOrString(t?.section) ?? toNullOrString(prev?.section) ?? null,
+      page:
+        (typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null) ??
+        (typeof prev?.page === "number" && Number.isFinite(prev.page) ? prev.page : null),
+      remarks: toNullOrString(t?.remarks) ?? toNullOrString(prev?.remarks) ?? null
+    };
+
+    map.set(key, merged);
   }
 
   return Array.from(map.values());
@@ -1832,6 +1879,17 @@ function mergeTestEntries(existing, incoming) {
 function filterDocsTestsToMedicalOnly(tests) {
   const list = Array.isArray(tests) ? tests : [];
   if (list.length === 0) return [];
+
+  const pickLatestValue = (t) => {
+    const direct = toNullOrString(t?.value);
+    if (direct) return direct;
+    const results = Array.isArray(t?.results) ? t.results : [];
+    for (let i = results.length - 1; i >= 0; i -= 1) {
+      const v = toNullOrString(results[i]?.value);
+      if (v) return v;
+    }
+    return null;
+  };
 
   const addressKeywordRegex =
     /\b(floor|flr|block|layout|phase|road|rd\.?|street|st\.?|sector|nagar|nag\.?|jp\s*nagar|bangalore|bengaluru|karnataka|india|pincode|pin\s*code|zip|district|state)\b/i;
@@ -1858,7 +1916,7 @@ function filterDocsTestsToMedicalOnly(tests) {
   for (const t of list) {
     if (!t || typeof t !== "object" || Array.isArray(t)) continue;
     const testName = toNullOrString(t?.testName);
-    const value = toNullOrString(t?.value);
+    const value = pickLatestValue(t);
     if (!testName || !value) continue;
 
     if (looksLikeAddress(testName) || looksLikeAddress(value)) continue;
@@ -1899,6 +1957,17 @@ function filterDocsTestsToMedicalTestsNoInterpretation(tests) {
   const list = Array.isArray(tests) ? tests : [];
   if (list.length === 0) return [];
 
+  const pickLatestValue = (t) => {
+    const direct = toNullOrString(t?.value);
+    if (direct) return direct;
+    const results = Array.isArray(t?.results) ? t.results : [];
+    for (let i = results.length - 1; i >= 0; i -= 1) {
+      const v = toNullOrString(results[i]?.value);
+      if (v) return v;
+    }
+    return null;
+  };
+
   const addressKeywordRegex =
     /\b(floor|flr|block|layout|phase|road|rd\.?|street|st\.?|sector|nagar|nag\.?|jp\s*nagar|bangalore|bengaluru|karnataka|india|pincode|pin\s*code|zip|district|state)\b/i;
   const looksLikeAddress = (s) => {
@@ -1933,7 +2002,7 @@ function filterDocsTestsToMedicalTestsNoInterpretation(tests) {
         testName
       );
     if (!nameHasMedicalKeywords) return false;
-    if (looksLikeMeaninglessValue(t?.value)) return false;
+    if (looksLikeMeaninglessValue(pickLatestValue(t))) return false;
     return true;
   };
 
@@ -1941,7 +2010,7 @@ function filterDocsTestsToMedicalTestsNoInterpretation(tests) {
   for (const t of list) {
     if (!t || typeof t !== "object" || Array.isArray(t)) continue;
     const testName = toNullOrString(t?.testName);
-    const value = toNullOrString(t?.value);
+    const value = pickLatestValue(t);
     if (!testName || !value) continue;
 
     if (looksLikeAddress(testName) || looksLikeAddress(value)) continue;
@@ -1978,7 +2047,14 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
   const rowsJson = JSON.stringify(
     list.map((t) => ({
       testName: toNullOrString(t?.testName),
-      value: toNullOrString(t?.value),
+      results: Array.isArray(t?.results)
+        ? t.results.map((r) => ({
+          value: toNullOrString(r?.value),
+          dateAndTime: toNullOrString(r?.dateAndTime)
+        }))
+        : toNullOrString(t?.value)
+          ? [{ value: toNullOrString(t?.value), dateAndTime: null }]
+          : [],
       unit: toNullOrString(t?.unit),
       referenceRange: toNullOrString(t?.referenceRange),
       status: toNullOrString(t?.status),
@@ -2014,6 +2090,14 @@ Your job:
   - Prefer 1–3 words when possible, but if the industry-standard name is longer, keep the standard name.
   - If the test exists in the dictionary, set testName to EXACTLY one of the dictionary test names (copy spelling as-is) and pick the shortest standard variant.
   - If the test does not exist in the dictionary, keep the original testName unchanged (do not invent a new name).
+ - Group the cleaned tests into medical categories. Use a short human-friendly category name (2–6 words), like "Renal & Electrolyte Profile", "Lipid Profile", "Liver Function", "Thyroid", "Complete Blood Count", "Diabetes", "Urine Routine", "Vitamins", "Hormones", "Inflammation", "Others".
+ - Put similar tests together in the same category. Avoid too many categories.
+ - If a test already has a good "section" value in the input, you may use it to decide the categoryName.
+ - Preserve multiple measurements for the same test across different dates/times:
+   - Use "results" array, each item includes { value, dateAndTime }.
+   - If you see the same testName multiple times with different dateAndTime, merge them under the same testName with multiple "results" entries.
+   - If dateAndTime is missing, set it to null.
+   - Do NOT invent dates/times.
 
 Medical dictionary (valid test names):
 ${dictionaryPrompt}
@@ -2025,14 +2109,21 @@ Return clean JSON ONLY with this structure:
 {
   "tests": [
     {
-      "testName": string,
-      "value": string,
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "Normal"|"High"|"Low"|"Absent"|"Present",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
+      "categoryName": string,
+      "tests": [
+        {
+          "testName": string,
+          "results": [
+            { "value": string, "dateAndTime": string|null }
+          ],
+          "unit": string|null,
+          "referenceRange": string|null,
+          "status": "Normal"|"High"|"Low"|"Absent"|"Present",
+          "section": string|null,
+          "page": number|null,
+          "remarks": string|null
+        }
+      ]
     }
   ]
 }`;
@@ -2050,7 +2141,7 @@ Return clean JSON ONLY with this structure:
       ],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
-      maxTokens: 4096
+      maxTokens: 8192
     });
     content = getTextFromAnthropicMessageResponse(response);
   } else {
@@ -2074,26 +2165,41 @@ Return clean JSON ONLY with this structure:
   if (!parsed && resolvedProvider === "claude") {
     parsed = await repairJsonObjectWithClaude({
       rawText: content,
-      schemaHint: `Schema: {"tests":[{"testName":"","value":"","unit":null,"referenceRange":null,"status":"","section":null,"page":null,"remarks":null}]}`,
+      schemaHint: `Schema: {"tests":[{"categoryName":"","tests":[{"testName":"","results":[{"value":"","dateAndTime":null}],"unit":null,"referenceRange":null,"status":"","section":null,"page":null,"remarks":null}]}]}`,
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
     });
   }
 
-  const cleaned = normalizeLooseIncomingTests(parsed ?? {});
-  const normalized = cleaned.map((t) => ({
-    ...t,
-    status: normalizeCleanerStatus(t?.status, t?.value),
-    testName: (() => {
-      const raw = toNullOrString(t?.testName);
-      if (!raw) return raw;
-      const key = canonicalizeTestName(raw);
-      const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
-      return preferred ?? raw;
-    })()
-  }));
-  const filtered = filterDocsTestsToMedicalTestsNoInterpretation(normalized);
-  if (debug) return { tests: filtered, raw: content };
-  return { tests: filtered };
+  const categories = normalizeCategorizedDocsTestsIncoming(parsed ?? {});
+  const normalizedCategories = categories
+    .map((c) => {
+      const name = requireString(c?.categoryName) ? String(c.categoryName).trim() : "Other Tests";
+      const incomingTests = Array.isArray(c?.tests) ? c.tests : [];
+      const normalized = incomingTests.map((t) => ({
+        ...t,
+        status: normalizeCleanerStatus(t?.status, t?.value),
+        results:
+          Array.isArray(t?.results) && t.results.length > 0
+            ? t.results
+            : toNullOrString(t?.value)
+              ? [{ value: toNullOrString(t?.value), dateAndTime: null }]
+              : [],
+        testName: (() => {
+          const raw = toNullOrString(t?.testName);
+          if (!raw) return raw;
+          const key = canonicalizeTestName(raw);
+          const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
+          return preferred ?? raw;
+        })()
+      }));
+      const filtered = filterDocsTestsToMedicalTestsNoInterpretation(normalized);
+      if (filtered.length === 0) return null;
+      return { categoryName: name || "Other Tests", tests: filtered };
+    })
+    .filter(Boolean);
+
+  if (debug) return { tests: normalizedCategories, raw: content };
+  return { tests: normalizedCategories };
 }
 
 async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames, provider }) {
@@ -2387,11 +2493,17 @@ Extract values exactly as written in the report.`;
 Goal:
 - Extract ONLY medical test / lab parameter results that are present in the document (blood tests, biochemistry, immunology, hormones, urinalysis, ratios, etc).
 
+Date/time handling:
+- Find the lab report's test/collection/reported date and time (if present) anywhere in the document.
+- Use that same date/time for every extracted test result in this document.
+- If date/time is not found, set dateAndTime = null.
+- Do NOT invent date/time.
+
 Hard exclusions (do NOT extract these even if they contain numbers):
 - Patient details: name, age, sex, address, phone, email
 - Lab/hospital address, branch address, doctor address
 - IDs: patient id, sample id, barcode, accession no, bill no
-- Dates/times, page headers/footers, reference text blocks that are not results
+- Page headers/footers, reference text blocks that are not results
 - Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
 
 Row validity rules:
@@ -2424,7 +2536,9 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
   "tests": [
     {
       "testName": string,
-      "value": string,
+      "results": [
+        { "value": string, "dateAndTime": string|null }
+      ],
       "unit": string|null,
       "referenceRange": string|null,
       "status": "LOW"|"HIGH"|"NORMAL",
@@ -2441,7 +2555,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
   "tests": [
     {
       "testName": string,
-      "value": string,
+      "results": [{ "value": string, "dateAndTime": string|null }],
       "unit": string|null,
       "referenceRange": string|null,
       "status": "LOW"|"HIGH"|"NORMAL",
@@ -2514,11 +2628,17 @@ Extract values exactly as written in the report.`;
 Goal:
 - Extract ONLY medical test / lab parameter results that are present in the document (blood tests, biochemistry, immunology, hormones, urinalysis, ratios, etc).
 
+Date/time handling:
+- Find the lab report's test/collection/reported date and time (if present) in the images/text.
+- Use that same date/time for every extracted test result in this document.
+- If date/time is not found, set dateAndTime = null.
+- Do NOT invent date/time.
+
 Hard exclusions (do NOT extract these even if they contain numbers):
 - Patient details: name, age, sex, address, phone, email
 - Lab/hospital address, branch address, doctor address
 - IDs: patient id, sample id, barcode, accession no, bill no
-- Dates/times, page headers/footers, reference text blocks that are not results
+- Page headers/footers, reference text blocks that are not results
 - Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
 
 Row validity rules:
@@ -2552,7 +2672,9 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
   "tests": [
     {
       "testName": string,
-      "value": string,
+      "results": [
+        { "value": string, "dateAndTime": string|null }
+      ],
       "unit": string|null,
       "referenceRange": string|null,
       "status": "LOW"|"HIGH"|"NORMAL",
@@ -2571,7 +2693,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
   "tests": [
     {
       "testName": string,
-      "value": string,
+      "results": [{ "value": string, "dateAndTime": string|null }],
       "unit": string|null,
       "referenceRange": string|null,
       "status": "LOW"|"HIGH"|"NORMAL",
@@ -3688,17 +3810,37 @@ gptRouter.post(
 
 gptRouter.post("/docs-tests-clean", upload.none(), async (req, res) => {
   try {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) {
+      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    }
+    if (provider === "claude" && !hasAnthropicKey()) {
+      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
+    }
+
     const raw = req?.body?.testsJson;
     if (!requireString(raw)) {
       return res.status(400).json({ error: "testsJson is required" });
     }
 
+    const debugAi = process.env.AI_DEBUG === "1";
     const parsedObject = safeParseJsonObject(raw);
     const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
-    const flattened = Array.isArray(parsedArray) ? parsedArray : flattenDocsTestsIncoming(parsedObject ?? {});
-    const normalized = normalizeLooseIncomingTests({ tests: flattened });
-    const tests = groupDocsTestsByCategory(normalized);
-    res.json({ tests });
+    const normalized =
+      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
+
+    const cleaned = await cleanDocsTestsWithAi({
+      openai,
+      provider,
+      tests: normalized,
+      debug: debugAi
+    });
+
+    const tests = Array.isArray(cleaned?.tests) ? cleaned.tests : [];
+    const payload = { tests };
+    if (debugAi) payload.raw = typeof cleaned?.raw === "string" ? cleaned.raw : null;
+    res.json(payload);
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: message });
@@ -3714,8 +3856,8 @@ gptRouter.post("/docs-tests-excel", upload.none(), async (req, res) => {
 
     const parsedObject = safeParseJsonObject(raw);
     const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
-    const flattened = Array.isArray(parsedArray) ? parsedArray : flattenDocsTestsIncoming(parsedObject ?? {});
-    const normalized = normalizeLooseIncomingTests({ tests: flattened });
+    const normalized =
+      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
 
     const standardized = normalized.map((t) => {
       const name = toNullOrString(t?.testName);
