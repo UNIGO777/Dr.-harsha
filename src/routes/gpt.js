@@ -2038,6 +2038,118 @@ function normalizeCleanerStatus(status, value) {
   return "NORMAL";
 }
 
+function isMissingDocsTestsField(value) {
+  const s = toNullOrString(value);
+  if (!s) return true;
+  const v = s.trim().toLowerCase();
+  if (!v) return true;
+  if (v === "not presented") return true;
+  if (v === "not_presented") return true;
+  if (v === "not found") return true;
+  if (v === "not_found") return true;
+  if (v === "na" || v === "n/a") return true;
+  if (v === "-" || v === "--") return true;
+  return false;
+}
+
+function mergeAndDedupeCleanedTestsByName(tests) {
+  const list = Array.isArray(tests) ? tests : [];
+  if (list.length <= 1) return list;
+
+  const normalizeDateKey = (v) => {
+    const s = typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim();
+    return s ? s.toLowerCase() : "";
+  };
+
+  const mergeResults = (a, b) => {
+    const out = [];
+    const seen = new Set();
+    const push = (r) => {
+      if (!r || typeof r !== "object" || Array.isArray(r)) return;
+      const value = toNullOrString(r?.value);
+      if (isMissingDocsTestsField(value)) return;
+      const dateAndTime = toNullOrString(r?.dateAndTime);
+      const key = `${normalizeDateKey(dateAndTime)}|${String(value).trim().toLowerCase()}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ value: String(value).trim(), dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim() });
+    };
+    for (const r of Array.isArray(a) ? a : []) push(r);
+    for (const r of Array.isArray(b) ? b : []) push(r);
+    return out;
+  };
+
+  const pickBestText = (a, b) => {
+    const aa = isMissingDocsTestsField(a) ? null : String(a).trim();
+    const bb = isMissingDocsTestsField(b) ? null : String(b).trim();
+    if (aa && bb) return bb.length >= aa.length ? bb : aa;
+    return bb ?? aa ?? null;
+  };
+
+  const statusPriority = (s) => {
+    const v = String(s ?? "").trim().toUpperCase();
+    if (v === "HIGH") return 4;
+    if (v === "LOW") return 3;
+    if (v === "PRESENT") return 2;
+    if (v === "ABSENT") return 2;
+    return 1;
+  };
+
+  const map = new Map();
+  const passthrough = [];
+
+  for (const t of list) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) continue;
+    const testName = toNullOrString(t?.testName);
+    const key = canonicalizeTestName(testName);
+    if (!key) {
+      passthrough.push(t);
+      continue;
+    }
+
+    const prev = map.get(key);
+    if (!prev) {
+      const results = mergeResults([], t?.results);
+      const value = isMissingDocsTestsField(t?.value) ? null : toNullOrString(t?.value);
+      map.set(key, { ...t, value, results });
+      continue;
+    }
+
+    const mergedResults = mergeResults(prev?.results, t?.results);
+    const prevValue = isMissingDocsTestsField(prev?.value) ? null : toNullOrString(prev?.value);
+    const nextValue = isMissingDocsTestsField(t?.value) ? null : toNullOrString(t?.value);
+    const value =
+      nextValue ??
+      prevValue ??
+      (mergedResults.length > 0 ? toNullOrString(mergedResults[mergedResults.length - 1]?.value) : null);
+
+    const merged = {
+      ...prev,
+      ...t,
+      testName: prev?.testName ?? t?.testName,
+      results: mergedResults,
+      value,
+      unit: pickBestText(prev?.unit, t?.unit),
+      referenceRange: pickBestText(prev?.referenceRange, t?.referenceRange),
+      section: pickBestText(prev?.section, t?.section),
+      remarks: pickBestText(prev?.remarks, t?.remarks),
+      page:
+        (typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null) ??
+        (typeof prev?.page === "number" && Number.isFinite(prev.page) ? prev.page : null),
+      status: (() => {
+        const a = toNullOrString(prev?.status);
+        const b = toNullOrString(t?.status);
+        return statusPriority(b) >= statusPriority(a) ? (b ?? a) : (a ?? b);
+      })()
+    };
+
+    map.set(key, merged);
+  }
+
+  const mergedList = [...passthrough, ...Array.from(map.values())];
+  return mergedList;
+}
+
 async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
   const list = Array.isArray(tests) ? tests : [];
   if (list.length === 0) return { tests: [] };
@@ -2077,6 +2189,7 @@ Do not add extra fields.`;
 Your job:
 - Identify and extract ONLY real medical test entries (lab parameters).
 - Clean and normalize the data.
+- there is some times the iron tests comming more then 1 time if after one time it come and have no pera meter like all value in that are not presented so remove it 
 - Remove explanatory paragraphs and irrelevant text.
 - Standardize status values (Normal, High, Low, Absent, Present).
 - Keep the original numeric value and unit exactly as given.
@@ -2193,8 +2306,9 @@ Return clean JSON ONLY with this structure:
         })()
       }));
       const filtered = filterDocsTestsToMedicalTestsNoInterpretation(normalized);
-      if (filtered.length === 0) return null;
-      return { categoryName: name || "Other Tests", tests: filtered };
+      const deduped = mergeAndDedupeCleanedTestsByName(filtered);
+      if (deduped.length === 0) return null;
+      return { categoryName: name || "Other Tests", tests: deduped };
     })
     .filter(Boolean);
 
