@@ -10,6 +10,48 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createAdvancedBodyCompositionHandler } from "../Controllers/AdvancedBodyCompositionController.js";
+import { createBloodAnalysisHandler, createOtherAnalysisHandler } from "../Controllers/BloodOtherController.js";
+import {
+  createDocsTestsCleanHandler,
+  createDocsTestsExcelHandler,
+  createDocsTestsHandler
+} from "../Controllers/DocsTestsController.js";
+import { createGptChatHandler } from "../Controllers/GptChatController.js";
+import {
+  createHeartAnalysisHandler,
+  createHeartUrineAnalysisHandler,
+  createUrineAnalysisHandler
+} from "../Controllers/HeartUrineController.js";
+
+import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
+import {
+  JSON_REPAIR_SYSTEM_PROMPT,
+  buildJsonRepairArrayUserPrompt,
+  buildJsonRepairObjectUserPrompt
+} from "../AiPrompts/jsonRepairPrompts.js";
+import {
+  DOCS_TESTS_CLEAN_SCHEMA_HINT,
+  DOCS_TESTS_CLEAN_SYSTEM_PROMPT,
+  buildDocsTestsCleanUserPrompt
+} from "../AiPrompts/docsTestsCleanPrompts.js";
+import { MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT } from "../AiPrompts/medicalReportExtractionPrompts.js";
+import {
+  BLOOD_IMAGES_USER_PROMPT,
+  BLOOD_SCHEMA_HINT,
+  BLOOD_TEXT_FALLBACK_CLAUDE_USER_PROMPT,
+  BLOOD_TEXT_USER_PROMPT
+} from "../AiPrompts/bloodPrompts.js";
+import {
+  DOCS_TESTS_IMAGES_USER_PROMPT,
+  DOCS_TESTS_SCHEMA_HINT,
+  DOCS_TESTS_TEXT_USER_PROMPT
+} from "../AiPrompts/docsTestsPrompts.js";
+import { HEART_RELATED_TESTS_SYSTEM_PROMPT, buildHeartRelatedTestsUserPrompt } from "../AiPrompts/heartPrompts.js";
+import { TESTS_FROM_PDFS_SYSTEM_PROMPT, buildTestsFromPdfsUserPrompt } from "../AiPrompts/testsFromPdfsPrompts.js";
+import { buildTestsFromImagesUserPrompt } from "../AiPrompts/testsFromImagesPrompts.js";
+import { URINOGRAM_ANCHOR_TERMS, buildUrinogramUserPrompt } from "../AiPrompts/urinePrompts.js";
+
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -570,147 +612,11 @@ const upload = multer({
 
 export const gptRouter = express.Router();
 
-gptRouter.post("/gpt", upload.array("files", MAX_ANALYSIS_FILES), async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const { prompt, model, temperature } = req.body ?? {};
-    const bodyMessages =
-      Array.isArray(req.body?.messages) ? req.body.messages : parseMaybeJson(req.body?.messages);
-    const messages = bodyMessages;
-
-    const normalizedMessages = Array.isArray(messages)
-      ? messages
-      : requireString(prompt)
-        ? [{ role: "user", content: prompt }]
-        : null;
-
-    if (!normalizedMessages) {
-      return res.status(400).json({
-        error: "Provide either { prompt: string } or { messages: [{role, content}] }"
-      });
-    }
-
-    const files = Array.isArray(req.files) ? req.files : [];
-    const imageFiles = files.filter((f) => isImageMime(f.mimetype));
-    const pdfFiles = files.filter((f) => isPdfMime(f.mimetype));
-    const docxFiles = files.filter((f) => isDocxMime(f.mimetype));
-    const unsupportedFiles = files.filter(
-      (f) => !isImageMime(f.mimetype) && !isPdfMime(f.mimetype) && !isDocxMime(f.mimetype)
-    );
-
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: `Unsupported file types: ${unsupportedFiles
-          .map((f) => f.mimetype || "unknown")
-          .join(", ")}`
-      });
-    }
-
-    const lastIndex = normalizedMessages.length - 1;
-    const lastMessage = normalizedMessages[lastIndex];
-
-    const existingUserText =
-      lastMessage?.role === "user" ? getTextFromMessageContent(lastMessage.content) : "";
-
-    const baseText =
-      lastMessage?.role === "user"
-        ? requireString(existingUserText)
-          ? existingUserText
-          : requireString(prompt)
-            ? prompt
-            : "Please help with the attached files."
-        : requireString(prompt)
-          ? prompt
-          : "Please help with the attached files.";
-
-    let pdfText = "";
-    for (const f of pdfFiles) {
-      const data = await pdfParse(f.buffer);
-      const extracted = typeof data.text === "string" ? data.text : "";
-      const trimmed = extracted.trim();
-      if (trimmed.length === 0) continue;
-      const capped = trimmed.length > 20000 ? trimmed.slice(0, 20000) : trimmed;
-      pdfText += `\n\n[PDF: ${f.originalname}]\n${capped}`;
-    }
-
-    let docxText = "";
-    for (const f of docxFiles) {
-      const result = await mammoth.extractRawText({ buffer: f.buffer });
-      const extracted = typeof result?.value === "string" ? result.value : "";
-      const trimmed = extracted.trim();
-      if (trimmed.length === 0) continue;
-      const capped = trimmed.length > 20000 ? trimmed.slice(0, 20000) : trimmed;
-      docxText += `\n\n[DOCX: ${f.originalname}]\n${capped}`;
-    }
-
-    const contentParts = [{ type: "text", text: `${baseText}${pdfText}${docxText}` }];
-    for (const f of imageFiles) {
-      const b64 = f.buffer.toString("base64");
-      const dataUrl = `data:${f.mimetype};base64,${b64}`;
-      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
-    }
-
-    if (provider === "claude") {
-      const anthropicContent = [{ type: "text", text: `${baseText}${pdfText}${docxText}` }];
-      for (const f of imageFiles) {
-        anthropicContent.push({
-          type: "image",
-          source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
-        });
-      }
-
-      const response = await anthropicCreateJsonMessage({
-        system: null,
-        messages: [{ role: "user", content: anthropicContent }],
-        model: requireString(model) ? model : undefined,
-        temperature: parseMaybeNumber(temperature) ?? 0.2,
-        maxTokens: 4096
-      });
-
-      const content = getTextFromAnthropicMessageResponse(response);
-      res.json({
-        id: response?.id ?? null,
-        model: response?.model ?? (requireString(model) ? model : process.env.ANTHROPIC_MODEL || null),
-        content,
-        usage: response?.usage ?? null
-      });
-      return;
-    }
-
-    const finalMessages = [...normalizedMessages];
-    if (finalMessages[lastIndex]?.role === "user") {
-      finalMessages[lastIndex] = { ...finalMessages[lastIndex], content: contentParts };
-    } else {
-      finalMessages.push({ role: "user", content: contentParts });
-    }
-
-    const completion = await openai.chat.completions.create({
-      model: requireString(model) ? model : process.env.OPENAI_MODEL || "gpt-4o-mini",
-      temperature: parseMaybeNumber(temperature) ?? 0.2,
-      messages: finalMessages
-    });
-
-    const content = completion.choices?.[0]?.message?.content ?? "";
-
-    res.json({
-      id: completion.id,
-      model: completion.model,
-      content,
-      usage: completion.usage ?? null
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+gptRouter.post(
+  "/gpt",
+  upload.array("files", MAX_ANALYSIS_FILES),
+  createGptChatHandler(getGptControllerContext)
+);
 
 function safeParseJsonObject(text) {
   if (!requireString(text)) return null;
@@ -783,23 +689,8 @@ function safeParseJsonArrayLoose(text) {
 
 async function repairJsonObjectWithClaude({ rawText, schemaHint, model }) {
   const cleaned = requireString(rawText) ? rawText : "";
-  const system = `You are a JSON repair tool.
-
-Return ONLY valid JSON.
-Do not return markdown.
-Do not return explanations.
-Do not hallucinate new fields.`;
-
-  const user = `${requireString(schemaHint) ? schemaHint : ""}
-
-You are given a model output that was supposed to be a single JSON object, but it may be truncated or invalid.
-Your job:
-- Extract the largest valid JSON object you can recover.
-- If there are incomplete trailing objects/arrays, drop the incomplete tail.
-- Output ONE JSON object only.
-
-[MODEL_OUTPUT]
-${cleaned}`;
+  const system = JSON_REPAIR_SYSTEM_PROMPT;
+  const user = buildJsonRepairObjectUserPrompt({ schemaHint, rawText: cleaned });
 
   const response = await anthropicCreateJsonMessage({
     system,
@@ -815,23 +706,8 @@ ${cleaned}`;
 
 async function repairJsonArrayWithClaude({ rawText, schemaHint, model }) {
   const cleaned = requireString(rawText) ? rawText : "";
-  const system = `You are a JSON repair tool.
-
-Return ONLY valid JSON.
-Do not return markdown.
-Do not return explanations.
-Do not hallucinate new fields.`;
-
-  const user = `${requireString(schemaHint) ? schemaHint : ""}
-
-You are given a model output that was supposed to be a single JSON array, but it may be truncated or invalid.
-Your job:
-- Extract the largest valid JSON array you can recover.
-- If there are incomplete trailing objects/arrays, drop the incomplete tail.
-- Output ONE JSON array only.
-
-[MODEL_OUTPUT]
-${cleaned}`;
+  const system = JSON_REPAIR_SYSTEM_PROMPT;
+  const user = buildJsonRepairArrayUserPrompt({ schemaHint, rawText: cleaned });
 
   const response = await anthropicCreateJsonMessage({
     system,
@@ -2241,82 +2117,14 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
   );
   const rowsForPrompt = capTextForPrompt(rowsJson, 20000);
 
-  const systemPrompt = `You are a medical report data cleaner and extractor.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.`;
-
-  const userPrompt = `Input: Raw OCR/text extracted from a lab report table (may contain noise, descriptions, broken rows, and mixed urine/blood tests).
-
-Your job:
-- Identify and extract ONLY real medical test entries (lab parameters).
-- Clean and normalize the data.
-- Remove explanatory paragraphs and irrelevant text.
-- Standardize status values (Normal, High, Low, Absent, Present).
-- Preserve values EXACTLY as provided in the input rows:
-  - Copy each "results[].value" character-for-character (do not round, do not change decimal places, do not drop trailing zeros).
-  - Preserve comparison symbols like "<", ">", "≤", "≥" when they are part of the value or referenceRange.
-  - Do NOT move "Technology/Method" text (e.g., "ICP-MS", "HPLC") into testName, value, unit, or referenceRange.
-- If the result says "ABSENT", store result as "Absent".
-- Drop rows that are NOT medical tests (interpretation / classification / ranges / labels / address blocks).
-- Examples of rows to DROP: "Normal", "Prediabetic", "Good Control", "Fair Control", "Unsatisfactory Control", "c values", "to 125 mg/dl", "or higher", and pure range/category lines.
-- Keep medical parameters even if they are not in the dictionary, as long as they are clearly medical (have unit/referenceRange/section/remarks or are common lab parameters).
-- Test name normalization is critical:
-  - Replace long/verbose titles with a concise industry-standard test name.
-  - Do NOT include units, reference ranges, or extra explanatory words inside testName.
-  - Do NOT include technology/method terms (e.g., "ICP-MS", "HPLC", "ELISA") inside testName.
-  - Prefer 1–3 words when possible, but if the industry-standard name is longer, keep the standard name.
-  - If the test exists in the dictionary, set testName to EXACTLY one of the dictionary test names (copy spelling as-is) and pick the shortest standard variant.
-  - If the test does not exist in the dictionary, keep the original testName unchanged (do not invent a new name).
- - Group the cleaned tests into medical categories. Use a short human-friendly category name (2–6 words), like "Renal & Electrolyte Profile", "Lipid Profile", "Liver Function", "Thyroid", "Complete Blood Count", "Diabetes", "Urine Routine", "Vitamins", "Hormones", "Inflammation", "Others".
- - Put similar tests together in the same category. Avoid too many categories.
- - If a test already has a good "section" value in the input, you may use it to decide the categoryName.
- - Preserve multiple measurements for the same test across different dates/times:
-   - Use "results" array, each item includes { value, dateAndTime }.
-   - If you see the same testName multiple times with different dateAndTime, merge them under the same testName with multiple "results" entries.
-   - If dateAndTime is missing, set it to null.
-   - Do NOT invent dates/times.
- - Deduplication rules (IMPORTANT):
-   - Within each category, do NOT output duplicate testName rows. If the same testName appears multiple times, merge into ONE row.
-   - Do NOT output placeholder rows where value is missing/"not presented"/"not found"/"NA" and referenceRange is missing/"not presented".
-   - If you see a duplicate testName where one row has a real value and another row is "not presented", keep ONLY the real one (merge results if needed).
-
-Medical dictionary (valid test names):
-${dictionaryPrompt}
-
-Input rows (JSON array):
-${rowsForPrompt}
-
-Return clean JSON ONLY with this structure:
-{
-  "tests": [
-    {
-      "categoryName": string,
-      "tests": [
-        {
-          "testName": string,
-          "results": [
-            { "value": string, "dateAndTime": string|null }
-          ],
-          "unit": string|null,
-          "referenceRange": string|null,
-          "status": "Normal"|"High"|"Low"|"Absent"|"Present",
-          "section": string|null,
-          "page": number|null,
-          "remarks": string|null
-        }
-      ]
-    }
-  ]
-}`;
+  const systemPrompt = DOCS_TESTS_CLEAN_SYSTEM_PROMPT;
+  const userPrompt = buildDocsTestsCleanUserPrompt({ dictionaryPrompt, rowsForPrompt });
 
   const resolvedProvider = normalizeAiProvider(provider);
   let content = "";
   if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
         {
           role: "user",
@@ -2334,7 +2142,7 @@ Return clean JSON ONLY with this structure:
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: userPrompt }
       ]
     });
@@ -2349,7 +2157,7 @@ Return clean JSON ONLY with this structure:
   if (!parsed && resolvedProvider === "claude") {
     parsed = await repairJsonObjectWithClaude({
       rawText: content,
-      schemaHint: `Schema: {"tests":[{"categoryName":"","tests":[{"testName":"","results":[{"value":"","dateAndTime":null}],"unit":null,"referenceRange":null,"status":"","section":null,"page":null,"remarks":null}]}]}`,
+      schemaHint: DOCS_TESTS_CLEAN_SCHEMA_HINT,
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022"
     });
   }
@@ -2426,52 +2234,8 @@ Return clean JSON ONLY with this structure:
 }
 
 async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames, provider }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-You must strictly extract test data from medical PDF(s).
-You must follow the provided test list exactly.
-You must not skip any test.
-You must not invent data.
-You must not explain anything.
-You must return JSON only.
-You must extract the exact value text from the PDF(s). Do not modify the value.
-
-If a test from the list is not present in the PDF(s), mark:
-"value": null
-"unit": null
-"referenceRange": null
-"status": "NOT_PRESENTED"`;
-
-  const userPrompt = `Extract test data from the uploaded medical PDF(s).
-
-You MUST search ONLY for the following tests:
-
-TEST LIST:
-${bulletList(testNames)}
-
-For EACH test return:
-- testName
-- value
-- unit
-- referenceRange
-- status
-
-Status Rules:
-- If value < range \u2192 LOW
-- If value > range \u2192 HIGH
-- If within range \u2192 NORMAL
-- If test not present \u2192 NOT_PRESENTED
-
-Return JSON ONLY with this format:
-{
-  "tests": [
-    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
-  ]
-}
-
-Do not add extra keys.
-Do not add text.
-Return JSON only.`;
+  const systemPrompt = TESTS_FROM_PDFS_SYSTEM_PROMPT;
+  const userPrompt = buildTestsFromPdfsUserPrompt({ testList: bulletList(testNames) });
 
   let content = "";
   const resolvedProvider = normalizeAiProvider(provider);
@@ -2483,7 +2247,7 @@ Return JSON only.`;
 
   if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
         {
           role: "user",
@@ -2505,7 +2269,7 @@ Return JSON only.`;
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${textForPrompt}` }
       ]
     });
@@ -2521,7 +2285,7 @@ Return JSON only.`;
       temperature: 0,
       text: { format: { type: "json_object" } },
       input: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         {
           role: "user",
           content: [...fileParts, { type: "input_text", text: userPrompt }]
@@ -2536,81 +2300,16 @@ Return JSON only.`;
 }
 
 async function extractAllBloodParametersFromText({ openai, extractedText, provider, debug }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.
-Do not hallucinate.
-Extract values exactly as written in the report.`;
-
-  const userPrompt = `Read the report text systematically (in order). Treat it like reading the PDF page-by-page.
-
-Extract EVERY single parameter/value row you can find, including:
-- Ratios and derived values
-- Any "Physical Examination", "Chemical Examination", "Microscopy", "Impression", "Remarks" style values
-- Any lab table line-items (even if they are not typical blood markers)
-
-Rules:
-- Extract ONLY what is actually present with an observed value in the report text.
-- Do NOT invent missing tests.
-- Keep the observed value text exactly as written.
-- If unit/range/remarks are missing, set them to null.
-- Prefer one row per distinct parameter occurrence; dedupe only if exact duplicates.
-
-Status rules:
-- If referenceRange is available AND value is numeric (or contains a numeric), set status to LOW/HIGH/NORMAL accordingly.
-- Otherwise set status to NORMAL.
-
-Self-audit before returning JSON:
-- Page/order check: confirm you processed the text from start to end without skipping blocks.
-- Status verification: confirm any LOW/HIGH assignment is supported by the reference range.
-- Count check: ensure tests.length matches the number of extracted line-items (no obvious omissions).
-
-Important output constraint:
-- Keep output compact to avoid truncation.
-- Return at most 120 tests for this chunk.
-
-Return ONLY valid JSON with this structure (no extra wrapper text):
-{
-  "meta": {
-    "pagesAudited": number|null,
-    "parametersExtracted": number,
-    "qualityChecklist": {
-      "pageCountChecked": boolean,
-      "statusVerified": boolean,
-      "countChecked": boolean,
-      "noHallucinations": boolean,
-      "deduped": boolean
-    }
-  },
-  "tests": [
-    {
-      "testName": string,
-      "value": string,
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
-    }
-  ]
-}`;
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = BLOOD_TEXT_USER_PROMPT;
 
   const resolvedProvider = normalizeAiProvider(provider);
-  const schemaHint = `Schema:
-{
-  "tests": [
-    { "testName": string, "value": string, "unit": string|null, "referenceRange": string|null, "status": "LOW"|"HIGH"|"NORMAL", "section": string|null, "page": number|null, "remarks": string|null }
-  ]
-}`;
+  const schemaHint = BLOOD_SCHEMA_HINT;
 
   let content = "";
   if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
         {
           role: "user",
@@ -2628,7 +2327,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }
       ]
     });
@@ -2647,31 +2346,10 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
   if (resolvedProvider === "claude") {
     const maybeTests = normalizeLooseIncomingTests(parsedJson ?? {});
     if (maybeTests.length === 0) {
-      const fallbackUserPrompt = `Extract ONLY medical test / lab parameter rows from the report text.
-
-Hard exclusions (do NOT extract these even if they contain numbers):
-- Patient address, phone, email, name, age, gender
-- Lab / hospital address, doctor address, billing details
-- IDs (patient id, sample id, barcode), page headers/footers
-- Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
-
-Rules:
-- Extract ONLY line-items that are clearly medical test parameters (analytes, hormones, antibodies, ratios, urinalysis line-items, etc).
-- Each extracted row MUST have an observed value for the parameter.
-- Ignore serial numbers / row indices.
-- If unit/referenceRange/section/page/remarks are missing, set them to null.
-- If you are unsure whether a row is a medical test, exclude it.
-- Keep value text exactly as written.
-
-Return JSON only:
-{
-  "tests": [
-    { "testName": "", "value": "", "unit": null, "referenceRange": null, "status": "NORMAL", "section": null, "page": null, "remarks": null }
-  ]
-}`;
+      const fallbackUserPrompt = BLOOD_TEXT_FALLBACK_CLAUDE_USER_PROMPT;
 
       const response2 = await anthropicCreateJsonMessage({
-        system: `${systemPrompt}\n\nOutput must be JSON.`,
+        system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
         messages: [
           {
             role: "user",
@@ -2702,104 +2380,16 @@ Return JSON only:
 }
 
 async function extractDocsTestsFromText({ openai, extractedText, provider, debug }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.
-Do not hallucinate.
-Extract values exactly as written in the report.`;
-
-  const userPrompt = `Read the report text systematically (in order), like reading the PDF page-by-page.
-
-Goal:
-- Extract ONLY medical test / lab parameter results that are present in the document (blood tests, biochemistry, immunology, hormones, urinalysis, ratios, etc).
-
-Date/time handling:
-- Find the lab report's test/collection/reported date and time (if present) anywhere in the document.
-- Use that same date/time for every extracted test result in this document.
-- If date/time is not found, set dateAndTime = null.
-- Do NOT invent date/time.
-
-Hard exclusions (do NOT extract these even if they contain numbers):
-- Patient details: name, age, sex, address, phone, email
-- Lab/hospital address, branch address, doctor address
-- IDs: patient id, sample id, barcode, accession no, bill no
-- Page headers/footers, reference text blocks that are not results
-- Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
-
-Row validity rules:
-- Each extracted row must be a real medical parameter/test name (use your medical knowledge as a dictionary).
-- Each row MUST have an observed value for that parameter.
-- Ignore serial numbers / row indices.
-- Do NOT invent missing tests.
-- Keep the observed value text exactly as written (do not round, do not change decimal places, do not drop trailing zeros).
-- If the report shows symbols like "<", ">", "≤", "≥" as part of value or referenceRange, keep them exactly.
-- If value is missing or says "not presented"/"not found"/"NA", do NOT include that row.
-- If the report is in a table with columns like "TEST NAME | TECHNOLOGY/METHOD | VALUE | UNITS | REFERENCE RANGE":
-  - testName must come ONLY from the test name column (no technology/method text inside testName).
-  - unit must come ONLY from the units column (no test name or technology/method concatenated).
-  - referenceRange must come ONLY from the reference range column.
-  - If you need to keep technology/method, put it in section or remarks (not in testName/unit/value/referenceRange).
-- If unit/referenceRange/section/page/remarks are missing, set them to null.
-- If you are unsure whether a row is a medical test, exclude it.
-
-Self-audit before returning JSON:
-- Remove any non-medical rows (especially addresses/IDs).
-- Double-check that each value is copied exactly from the report text.
-- Verify LOW/HIGH is only set when supported by referenceRange.
-
-Return ONLY valid JSON with this structure (no extra wrapper text):
-{
-  "meta": {
-    "pagesAudited": number|null,
-    "parametersExtracted": number,
-    "qualityChecklist": {
-      "pageCountChecked": boolean,
-      "statusVerified": boolean,
-      "countChecked": boolean,
-      "noHallucinations": boolean,
-      "deduped": boolean
-    }
-  },
-  "tests": [
-    {
-      "testName": string,
-      "results": [
-        { "value": string, "dateAndTime": string|null }
-      ],
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
-    }
-  ]
-}`;
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = DOCS_TESTS_TEXT_USER_PROMPT;
 
   const resolvedProvider = normalizeAiProvider(provider);
-  const schemaHint = `Schema:
-{
-  "tests": [
-    {
-      "testName": string,
-      "results": [{ "value": string, "dateAndTime": string|null }],
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
-    }
-  ]
-}`;
+  const schemaHint = DOCS_TESTS_SCHEMA_HINT;
 
   let content = "";
   if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
         {
           role: "user",
@@ -2817,7 +2407,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: `${userPrompt}\n\n[REPORT_TEXT]\n${extractedText}` }
       ]
     });
@@ -2844,102 +2434,11 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
 }
 
 async function extractDocsTestsFromImagesAndText({ openai, imageFiles, extractedText, provider, debug }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.
-Do not hallucinate.
-Extract values exactly as written in the report.`;
-
-  const userPrompt = `Read the report page-by-page from the images (and extracted text) carefully.
-
-Goal:
-- Extract ONLY medical test / lab parameter results that are present in the document (blood tests, biochemistry, immunology, hormones, urinalysis, ratios, etc).
-
-Date/time handling:
-- Find the lab report's test/collection/reported date and time (if present) in the images/text.
-- Use that same date/time for every extracted test result in this document.
-- If date/time is not found, set dateAndTime = null.
-- Do NOT invent date/time.
-
-Hard exclusions (do NOT extract these even if they contain numbers):
-- Patient details: name, age, sex, address, phone, email
-- Lab/hospital address, branch address, doctor address
-- IDs: patient id, sample id, barcode, accession no, bill no
-- Page headers/footers, reference text blocks that are not results
-- Any location/address line (e.g. contains Floor/Block/Road/Nagar/Bangalore/Pincode)
-
-Row validity rules:
-- Each extracted row must be a real medical parameter/test name (use your medical knowledge as a dictionary).
-- Each row MUST have an observed value for that parameter.
-- Ignore serial numbers / row indices.
-- Do NOT invent missing tests.
-- Keep the observed value text exactly as written (do not round, do not change decimal places, do not drop trailing zeros).
-- If the report shows symbols like "<", ">", "≤", "≥" as part of value or referenceRange, keep them exactly.
-- If value is missing or says "not presented"/"not found"/"NA", do NOT include that row.
-- If the report is in a table with columns like "TEST NAME | TECHNOLOGY/METHOD | VALUE | UNITS | REFERENCE RANGE":
-  - testName must come ONLY from the test name column (no technology/method text inside testName).
-  - unit must come ONLY from the units column (no test name or technology/method concatenated).
-  - referenceRange must come ONLY from the reference range column.
-  - If you need to keep technology/method, put it in section or remarks (not in testName/unit/value/referenceRange).
-- If unit/referenceRange/section/page/remarks are missing, set them to null.
-- Do NOT skip any row in any RESULTS table.
-- If you are unsure whether a row is a medical test, exclude it.
-
-Self-audit before returning JSON:
-- Remove any non-medical rows (especially addresses/IDs).
-- Double-check that each value is copied exactly from the report.
-- Verify LOW/HIGH is only set when supported by referenceRange.
-
-Return ONLY valid JSON with this structure (no extra wrapper text):
-{
-  "meta": {
-    "pagesAudited": number|null,
-    "parametersExtracted": number,
-    "qualityChecklist": {
-      "pageCountChecked": boolean,
-      "statusVerified": boolean,
-      "countChecked": boolean,
-      "noHallucinations": boolean,
-      "deduped": boolean
-    }
-  },
-  "tests": [
-    {
-      "testName": string,
-      "results": [
-        { "value": string, "dateAndTime": string|null }
-      ],
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
-    }
-  ]
-}
-  
-`;
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = DOCS_TESTS_IMAGES_USER_PROMPT;
 
   const resolvedProvider = normalizeAiProvider(provider);
-  const schemaHint = `Schema:
-{
-  "tests": [
-    {
-      "testName": string,
-      "results": [{ "value": string, "dateAndTime": string|null }],
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
-    }
-  ]
-}`;
+  const schemaHint = DOCS_TESTS_SCHEMA_HINT;
 
   let content = "";
 
@@ -2952,7 +2451,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       });
     }
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [{ role: "user", content: parts }],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
@@ -2974,7 +2473,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: contentParts }
       ]
     });
@@ -3002,76 +2501,11 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
 }
 
 async function extractAllBloodParametersFromImagesAndText({ openai, imageFiles, extractedText, provider, debug }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.
-Do not hallucinate.
-Extract values exactly as written in the report.`;
-
-  const userPrompt = `Read the report images and accompanying extracted text systematically (page-by-page).
-
-Extract EVERY single parameter/value row you can find, including:
-- Ratios and derived values
-- Any "Physical Examination", "Chemical Examination", "Microscopy", "Impression", "Remarks" style values
-- Any lab table line-items (even if they are not typical blood markers)
-
-Rules:
-- Extract ONLY what is actually present with an observed value in the images/text.
-- Do NOT invent missing tests.
-- Keep the observed value text exactly as written.
-- If unit/range/remarks are missing, set them to null.
-- Prefer one row per distinct parameter occurrence; dedupe only if exact duplicates.
-
-Status rules:
-- If referenceRange is available AND value is numeric (or contains a numeric), set status to LOW/HIGH/NORMAL accordingly.
-- Otherwise set status to NORMAL.
-
-Self-audit before returning JSON:
-- Page/order check: confirm you processed the content sequentially.
-- Status verification: confirm any LOW/HIGH assignment is supported by the reference range.
-- Count check: ensure tests.length matches the number of extracted line-items (no obvious omissions).
-
-Important output constraint:
-- Keep output compact to avoid truncation.
-- Return at most 120 tests for this chunk.
-
-Return ONLY valid JSON with this structure (no extra wrapper text):
-{
-  "meta": {
-    "pagesAudited": number|null,
-    "parametersExtracted": number,
-    "qualityChecklist": {
-      "pageCountChecked": boolean,
-      "statusVerified": boolean,
-      "countChecked": boolean,
-      "noHallucinations": boolean,
-      "deduped": boolean
-    }
-  },
-  "tests": [
-    {
-      "testName": string,
-      "value": string,
-      "unit": string|null,
-      "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
-      "section": string|null,
-      "page": number|null,
-      "remarks": string|null
-    }
-  ]
-}`;
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = BLOOD_IMAGES_USER_PROMPT;
 
   const resolvedProvider = normalizeAiProvider(provider);
-  const schemaHint = `Schema:
-{
-  "tests": [
-    { "testName": string, "value": string, "unit": string|null, "referenceRange": string|null, "status": "LOW"|"HIGH"|"NORMAL", "section": string|null, "page": number|null, "remarks": string|null }
-  ]
-}`;
+  const schemaHint = BLOOD_SCHEMA_HINT;
 
   let content = "";
   if (resolvedProvider === "claude") {
@@ -3085,7 +2519,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       });
     }
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [{ role: "user", content: parts }],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
@@ -3110,7 +2544,7 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: contentParts }
       ]
     });
@@ -3138,45 +2572,8 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
 }
 
 async function extractTestsFromImagesAndText({ openai, imageFiles, extractedText, testNames, provider }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.
-Do not hallucinate.
-Extract values exactly as written in the report.`;
-
-  const userPrompt = `Extract test data from the uploaded medical report images.
-
-You MUST search ONLY for the following tests:
-
-TEST LIST:
-${bulletList(testNames)}
-
-For EACH test return:
-- testName
-- value
-- unit
-- referenceRange
-- status
-
-Status Rules:
-- If value < range → LOW
-- If value > range → HIGH
-- If within range → NORMAL
-- If test not present → NOT_PRESENTED
-
-Return JSON ONLY with this format:
-{
-  "tests": [
-    { "testName": "", "value": "", "unit": "", "referenceRange": "", "status": "" }
-  ]
-}
-
-Do not add extra keys.
-Do not add text.
-Return JSON only.`;
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = buildTestsFromImagesUserPrompt({ testList: bulletList(testNames) });
 
   const resolvedProvider = normalizeAiProvider(provider);
   let content = "";
@@ -3195,7 +2592,7 @@ Return JSON only.`;
       });
     }
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [{ role: "user", content: parts }],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
@@ -3221,7 +2618,7 @@ Return JSON only.`;
     temperature: 0,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+      { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
       { role: "user", content: contentParts }
     ]
   });
@@ -3249,40 +2646,10 @@ function normalizeHeartRelatedIncomingTests(parsedJson) {
 }
 
 async function extractHeartRelatedTestsFromPdfs({ openai, pdfFiles, extractedText, provider }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return markdown.
-Do not return explanations.
-Do not return text outside JSON.`;
-
-  const userPrompt = `Extract all heart-related tests from the medical report.
-
-Heart-related tests include:
-${bulletList(HEART_RELATED_EXTRACT_TESTS)}
-
-Return ONLY valid JSON.
-Do not return markdown.
-Do not return explanations.
-Do not return text outside JSON.
-
-JSON format must be:
-{
-  "heart_related_tests": [
-    {
-      "test_name": "",
-      "observed_value": "",
-      "units": "",
-      "reference_range": "",
-      "status": ""
-    }
-  ]
-}
-
-Status must be one of:
-"Normal", "High", "Low", "Very High", "Borderline"
-
-If a test is not found, do not include it.`;
+  const systemPrompt = HEART_RELATED_TESTS_SYSTEM_PROMPT;
+  const userPrompt = buildHeartRelatedTestsUserPrompt({
+    heartTestsList: bulletList(HEART_RELATED_EXTRACT_TESTS)
+  });
 
   let content = "";
   const resolvedProvider = normalizeAiProvider(provider);
@@ -3294,7 +2661,7 @@ If a test is not found, do not include it.`;
 
   if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
         {
           role: "user",
@@ -3316,7 +2683,7 @@ If a test is not found, do not include it.`;
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${textForPrompt}` }
       ]
     });
@@ -3332,7 +2699,7 @@ If a test is not found, do not include it.`;
       temperature: 0,
       text: { format: { type: "json_object" } },
       input: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         {
           role: "user",
           content: [...fileParts, { type: "input_text", text: userPrompt }]
@@ -3408,89 +2775,15 @@ function hasUrinogramMarkers(text) {
 }
 
 async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, extractedText, provider }) {
-  const systemPrompt = `You are a medical report extraction engine.
-
-Return ONLY valid JSON.
-Do not return explanations.
-Do not return markdown.
-Do not add extra fields.
-Do not hallucinate.
-Extract values exactly as written in the report.`;
-
-  const userPrompt = `Extract ALL urinary test parameters from the medical report exactly as shown in the "Complete Urinogram" section.
-
-Include:
-
-Physical Examination:
-${bulletList(["Volume", "Colour", "Appearance", "Specific Gravity", "pH"])}
-
-Chemical Examination:
-${bulletList([
-  "Urinary Protein",
-  "Urinary Glucose",
-  "Urine Ketone",
-  "Urinary Bilirubin",
-  "Urobilinogen",
-  "Bile Salt",
-  "Bile Pigment",
-  "Urine Blood",
-  "Nitrite",
-  "Leucocyte Esterase"
-])}
-
-Microscopic Examination:
-${bulletList([
-  "Mucus",
-  "Red Blood Cells",
-  "Urinary Leucocytes (Pus Cells)",
-  "Epithelial Cells",
-  "Casts",
-  "Crystals",
-  "Bacteria",
-  "Yeast",
-  "Parasite"
-])}
-
-Strict JSON format:
-{
-  "urine_tests": [
-    {
-      "test_name": "",
-      "methodology": "",
-      "observed_value": "",
-      "units": "",
-      "reference_range": "",
-      "status": ""
-    }
-  ]
-}
-
-Rules:
-- If value matches reference range \u2192 status = "Normal"
-- If value deviates \u2192 status = "Abnormal"
-- If reference is text like "Absent" or "Clear", compare accordingly
-- Preserve text like "Present 1+(100-250 mg/dl)" exactly
-- If a parameter is not found, include it with:
-  - observed_value = "Not included in the PDF"
-  - methodology = ""
-  - units = ""
-  - reference_range = ""
-  - status = "Not included in the PDF"
-- Output must be valid JSON only.`;
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = buildUrinogramUserPrompt({ bulletList });
 
   const resolvedProvider = normalizeAiProvider(provider);
   if (resolvedProvider === "claude") {
     const parts = [
       {
         type: "text",
-        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 8000, [
-          "Complete Urinogram",
-          "Urinogram",
-          "Microscopic Examination",
-          "Chemical Examination",
-          "Urinary Protein",
-          "Urinary Glucose"
-        ])}`
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 8000, URINOGRAM_ANCHOR_TERMS)}`
       }
     ];
     for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
@@ -3501,7 +2794,7 @@ Rules:
     }
 
     const response = await anthropicCreateJsonMessage({
-      system: `${systemPrompt}\n\nOutput must be JSON.`,
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [{ role: "user", content: parts }],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
@@ -3524,7 +2817,7 @@ Rules:
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${extractedText}` }
       ]
     });
@@ -3542,7 +2835,7 @@ Rules:
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: `${userPrompt}\n\n[PDF_TEXT]\n${extractedText}` }
       ]
     });
@@ -3551,14 +2844,7 @@ Rules:
     const contentParts = [
       {
         type: "text",
-        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 6000, [
-          "Complete Urinogram",
-          "Urinogram",
-          "Microscopic Examination",
-          "Chemical Examination",
-          "Urinary Protein",
-          "Urinary Glucose"
-        ])}`
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 6000, URINOGRAM_ANCHOR_TERMS)}`
       }
     ];
     for (const f of imageList) {
@@ -3571,7 +2857,7 @@ Rules:
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         { role: "user", content: contentParts }
       ]
     });
@@ -3583,21 +2869,14 @@ Rules:
       return { type: "input_file", filename: f.originalname || "report.pdf", file_data: fileDataUrl };
     });
     const extraText = requireString(extractedText)
-      ? `\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 6000, [
-          "Complete Urinogram",
-          "Urinogram",
-          "Microscopic Examination",
-          "Chemical Examination",
-          "Urinary Protein",
-          "Urinary Glucose"
-        ])}`
+      ? `\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 6000, URINOGRAM_ANCHOR_TERMS)}`
       : "";
     const response = await openai.responses.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       temperature: 0,
       text: { format: { type: "json_object" } },
       input: [
-        { role: "system", content: `${systemPrompt}\n\nOutput must be JSON.` },
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
         {
           role: "user",
           content: [...fileParts, { type: "input_text", text: `${userPrompt}${extraText}` }]
@@ -3611,186 +2890,11 @@ Rules:
   return normalizeUrinogramIncomingTests(parsedJson);
 }
 
-gptRouter.post("/advanced-body-composition", upload.single("file"), async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const file = req.file;
-    if (!file || !isPdfMime(file.mimetype)) {
-      return res.status(400).json({ error: "Upload a single PDF as field name 'file'." });
-    }
-
-    const parsed = await pdfParse(file.buffer);
-    const extractedText = typeof parsed?.text === "string" ? parsed.text.trim() : "";
-    const requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : String(Date.now());
-
-    const schemaHint = [
-      "Return ONLY valid JSON. Do not include markdown.",
-      "Extract values from the body composition report and fill what you can; use null if missing.",
-      "Use numbers (not strings) for numeric values.",
-      "",
-      "Return JSON with this structure:",
-      "{",
-      '  "requestId": string,',
-      '  "report": {',
-      '    "title": string|null,',
-      '    "deviceCode": string|null,',
-      '    "brand": string|null,',
-      '    "person": { "id": string|null, "heightCm": number|null, "age": number|null, "gender": string|null, "testDateTime": string|null },',
-      '    "score": number|null,',
-      '    "bodyComposition": {',
-      '      "totalBodyWater": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '      "protein": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '      "mineral": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '      "bodyFatMass": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '      "summary": {',
-      '        "totalBodyWater": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '        "softLeanMass": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '        "fatFreeMass": { "value": number|null, "unit": string|null, "rangeText": string|null },',
-      '        "weight": { "value": number|null, "unit": string|null, "rangeText": string|null }',
-      "      }",
-      "    },",
-      '    "muscleFatAnalysis": {',
-      '      "weightKg": number|null,',
-      '      "skeletalMuscleMassKg": number|null,',
-      '      "bodyFatMassKg": number|null',
-      "    },",
-      '    "obesityAnalysis": {',
-      '      "bmi": number|null,',
-      '      "percentBodyFat": number|null,',
-      '      "waistHipRatio": number|null,',
-      '      "obesityRate": number|null,',
-      '      "bmiClass": string|null,',
-      '      "pbfClass": string|null',
-      "    },",
-      '    "weightControl": {',
-      '      "targetWeightKg": number|null,',
-      '      "weightControlKg": number|null,',
-      '      "fatControlKg": number|null,',
-      '      "muscleControlKg": number|null',
-      "    },",
-      '    "segmentalLean": {',
-      '      "rightArm": { "kg": number|null, "pct": number|null },',
-      '      "leftArm": { "kg": number|null, "pct": number|null },',
-      '      "trunk": { "kg": number|null, "pct": number|null },',
-      '      "rightLeg": { "kg": number|null, "pct": number|null },',
-      '      "leftLeg": { "kg": number|null, "pct": number|null }',
-      "    },",
-      '    "segmentalMuscle": {',
-      '      "rightArmKg": number|null, "rightArmPct": number|null, "leftArmKg": number|null, "leftArmPct": number|null, "trunkKg": number|null, "trunkPct": number|null, "rightLegKg": number|null, "rightLegPct": number|null, "leftLegKg": number|null, "leftLegPct": number|null',
-      "    },",
-      '    "segmentalFat": {',
-      '      "rightArmKg": number|null, "rightArmPct": number|null, "leftArmKg": number|null, "leftArmPct": number|null, "trunkKg": number|null, "trunkPct": number|null, "rightLegKg": number|null, "rightLegPct": number|null, "leftLegKg": number|null, "leftLegPct": number|null',
-      "    },",
-      '    "research": { "basalMetabolicRateKcal": number|null, "visceralFatArea": number|null },',
-      '    "impedance": {',
-      '      "freq50kHz": { "rightArm": number|null, "leftArm": number|null, "trunk": number|null, "rightLeg": number|null, "leftLeg": number|null },',
-      '      "freq250kHz": { "rightArm": number|null, "leftArm": number|null, "trunk": number|null, "rightLeg": number|null, "leftLeg": number|null }',
-      "    }",
-      "  }",
-      "}"
-    ].join("\n");
-
-    if (extractedText && provider === "claude") {
-      const response = await anthropicCreateJsonMessage({
-        system: "You extract structured data from a Body Composition Analysis Report in JSON.",
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `${schemaHint}\n\n[REQUEST_ID]\n${requestId}\n\n[PDF_TEXT]\n${extractedText}`
-              }
-            ]
-          }
-        ],
-        model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
-        temperature: 0,
-        maxTokens: 4096
-      });
-
-      const content = getTextFromAnthropicMessageResponse(response);
-      const json = stripBrandingFromAdvancedBodyCompositionPayload(safeParseJsonObjectLoose(content));
-
-      res.json({
-        requestId,
-        data: json,
-        raw: json ? null : content
-      });
-      return;
-    }
-
-    if (extractedText) {
-      const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: "You extract structured data from a Body Composition Analysis Report in JSON." },
-          { role: "user", content: `${schemaHint}\n\n[REQUEST_ID]\n${requestId}\n\n[PDF_TEXT]\n${extractedText}` }
-        ]
-      });
-
-      const content = completion.choices?.[0]?.message?.content ?? "";
-      const json = stripBrandingFromAdvancedBodyCompositionPayload(safeParseJsonObject(content));
-
-      res.json({
-        requestId,
-        data: json,
-        raw: json ? null : content
-      });
-      return;
-    }
-
-    if (provider === "claude") {
-      return res.status(400).json({
-        error: "Could not extract readable text from this PDF for Claude. Use GPT or upload a text-based PDF."
-      });
-    }
-
-    const base64 = file.buffer.toString("base64");
-    const fileDataUrl = `data:application/pdf;base64,${base64}`;
-
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      temperature: 0,
-      text: { format: { type: "json_object" } },
-      input: [
-        {
-          role: "system",
-          content: "You extract structured data from a Body Composition Analysis Report in JSON."
-        },
-        {
-          role: "user",
-          content: [
-            { type: "input_file", filename: file.originalname || "report.pdf", file_data: fileDataUrl },
-            { type: "input_text", text: `${schemaHint}\n\n[REQUEST_ID]\n${requestId}` }
-          ]
-        }
-      ]
-    });
-
-    const content = getTextFromResponsesOutput(response);
-    const json = stripBrandingFromAdvancedBodyCompositionPayload(safeParseJsonObject(content));
-
-    res.json({
-      requestId,
-      data: json,
-      raw: json ? null : content
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+gptRouter.post(
+  "/advanced-body-composition",
+  upload.single("file"),
+  createAdvancedBodyCompositionHandler(getGptControllerContext)
+);
 
 gptRouter.post(
   "/heart-urine-analysis",
@@ -3798,90 +2902,8 @@ gptRouter.post(
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
     { name: "file", maxCount: 1 }
   ]),
-  async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const uploaded = collectUploadedFiles(req);
-
-    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
-    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter(
-      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
-    );
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: "Only PDF, DOCX, and image files are allowed."
-      });
-    }
-    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
-      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
-    }
-
-    const pdfText =
-      provider === "claude"
-        ? await extractPdfTextRawForPrompt(pdfFiles)
-        : await extractPdfTextForPrompt(pdfFiles);
-    const docxText = await extractDocxTextForPrompt(docxFiles);
-    const extractedText = `${pdfText}${docxText}`;
-
-    const gptConcurrency = parseMaybeNumber(process.env.GPT_CONCURRENCY) ?? 2;
-
-    const heartPromise = extractHeartRelatedTestsFromPdfs({
-      openai,
-      pdfFiles,
-      extractedText,
-      provider
-    });
-
-    const urinePromise = extractUrinogramTestsFromPdfs({
-      openai,
-      pdfFiles,
-      imageFiles,
-      extractedText,
-      provider
-    });
-
-    const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
-    const chunkResults = await mapWithConcurrency(chunks, gptConcurrency, async (chunk) => {
-      return extractTestsFromPdfs({
-        openai,
-        pdfFiles,
-        extractedText,
-        testNames: chunk,
-        provider
-      });
-    });
-
-    const heartIncomingTests = await heartPromise;
-    const urineIncomingTests = await urinePromise;
-    const mergedParameterTests = chunkResults.reduce(
-      (acc, incoming) => mergeTestEntries(acc, incoming),
-      []
-    );
-
-    const heartTests = Array.isArray(heartIncomingTests) ? heartIncomingTests : [];
-    const heart = { data: heartTests.length > 0, tests: heartTests };
-    const urineTests = buildCompleteUrinogramTests(urineIncomingTests);
-    const urineHasAny = urineTests.some((t) => t?.status !== "Not included in the PDF");
-    const urine = { data: urineHasAny, tests: urineTests };
-    const blood = buildPresentedCategory(BLOOD_PARAMETER_TESTS, { tests: mergedParameterTests });
-    const other = buildPresentedCategory(OTHER_PARAMETER_TESTS, { tests: mergedParameterTests });
-
-    res.json({ heart, urine, blood, other });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+  createHeartUrineAnalysisHandler(getGptControllerContext)
+);
 
 gptRouter.post(
   "/docs-tests",
@@ -3889,238 +2911,12 @@ gptRouter.post(
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
     { name: "file", maxCount: 1 }
   ]),
-  async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
+  createDocsTestsHandler(getGptControllerContext)
+);
 
-    const debugAi = process.env.AI_DEBUG === "1";
+gptRouter.post("/docs-tests-clean", upload.none(), createDocsTestsCleanHandler(getGptControllerContext));
 
-    const uploaded = collectUploadedFiles(req);
-    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
-    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter(
-      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
-    );
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: "Only PDF, DOCX, and image files are allowed."
-      });
-    }
-    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
-      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
-    }
-
-    const { chunkIndex } = getChunkParams(req);
-
-    const pdfText = await extractPdfTextForBloodPrompt(pdfFiles);
-    const docxText = await extractDocxTextForBloodPrompt(docxFiles);
-    const extractedText = `${pdfText}${docxText}`;
-
-    const estimatedTotalTestsInReport = estimateTotalTestsInReportText(extractedText);
-
-    if (!requireString(extractedText) && imageFiles.length === 0) {
-      if (provider === "claude") {
-        return res.status(400).json({
-          error:
-            "Claude could not extract tests because this PDF has no readable text. Please upload images (JPG/PNG) of the report pages or use GPT for scanned PDFs."
-        });
-      }
-      const docs = { data: false, tests: [] };
-      const payload = {
-        docs,
-        chunkIndex: 0,
-        totalChunks: 1,
-        chunkSize: 1,
-        estimatedTotalTestsInReport
-      };
-      if (debugAi) {
-        payload.debug = {
-          provider,
-          extractedTextLength: 0,
-          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
-          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
-          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0
-        };
-      }
-      return res.json(payload);
-    }
-
-    const { safeIndex, totalChunks, chunkText, chunkSize } = sliceTextFixedWithOverlap(
-      extractedText,
-      chunkIndex,
-      4,
-      1200
-    );
-    const estimatedTotalTestsInChunk = estimateTotalTestsInReportText(chunkText);
-
-    const windows = splitTextWindows(chunkText, 12000, 600, 8);
-    const aiIncoming = [];
-    let lastRaw = "";
-    if (imageFiles.length > 0) {
-      const extraction = await extractDocsTestsFromImagesAndText({
-        openai,
-        imageFiles,
-        extractedText: chunkText,
-        provider,
-        debug: debugAi
-      });
-      lastRaw = typeof extraction?.raw === "string" ? extraction.raw : "";
-      const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
-      aiIncoming.push(...incomingTests);
-    } else if (windows.length > 0) {
-      for (const w of windows) {
-        const extraction = await extractDocsTestsFromText({
-          openai,
-          extractedText: w,
-          provider,
-          debug: debugAi
-        });
-        lastRaw = typeof extraction?.raw === "string" ? extraction.raw : lastRaw;
-        const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
-        aiIncoming.push(...incomingTests);
-      }
-    }
-
-    const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
-    const merged = mergeTestEntries(aiIncoming, heuristicTests);
-    const chunkTests = merged.filter((t) => {
-      const hasValue = !isMissingDocsTestsField(t?.value);
-      const hasResult =
-        Array.isArray(t?.results) && t.results.some((r) => !isMissingDocsTestsField(r?.value));
-      return hasValue || hasResult;
-    });
-    const filteredChunkTests = filterDocsTestsToMedicalOnly(chunkTests);
-
-    if (provider === "claude" && filteredChunkTests.length === 0) {
-      const payload = {
-        error:
-          "Claude returned no parsable tests for this chunk. This usually happens when the response was truncated or not valid JSON. Enable AI_DEBUG=1 to see the response preview, or try the next chunk / use images."
-      };
-      if (debugAi) {
-        payload.debug = {
-          provider,
-          extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
-          chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
-          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
-          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
-          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
-          aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null
-        };
-      }
-      return res.status(502).json(payload);
-    }
-
-    const hasAny = filteredChunkTests.length > 0;
-    const docs = { data: hasAny, tests: filteredChunkTests };
-    const payload = {
-      docs,
-      chunkIndex: safeIndex,
-      totalChunks,
-      chunkSize,
-      estimatedTotalTestsInReport,
-      estimatedTotalTestsInChunk
-    };
-    if (debugAi) {
-      payload.debug = {
-        provider,
-        extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
-        chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
-        pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
-        docxTextLength: typeof docxText === "string" ? docxText.length : 0,
-        imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
-        extractedTests: filteredChunkTests.length,
-        aiResponsePreview: lastRaw ? lastRaw.slice(0, 2000) : null,
-        aiIncomingTests: aiIncoming.length,
-        heuristicTests: Array.isArray(heuristicTests) ? heuristicTests.length : 0,
-        windows: windows.length
-      };
-    }
-    res.json(payload);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
-
-gptRouter.post("/docs-tests-clean", upload.none(), async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const raw = req?.body?.testsJson;
-    if (!requireString(raw)) {
-      return res.status(400).json({ error: "testsJson is required" });
-    }
-
-    const debugAi = process.env.AI_DEBUG === "1";
-    const parsedObject = safeParseJsonObject(raw);
-    const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
-    const normalized =
-      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
-
-    const cleaned = await cleanDocsTestsWithAi({
-      openai,
-      provider,
-      tests: normalized,
-      debug: debugAi
-    });
-
-    const tests = Array.isArray(cleaned?.tests) ? cleaned.tests : [];
-    const payload = { tests };
-    if (debugAi) payload.raw = typeof cleaned?.raw === "string" ? cleaned.raw : null;
-    res.json(payload);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
-
-gptRouter.post("/docs-tests-excel", upload.none(), async (req, res) => {
-  try {
-    const raw = req?.body?.testsJson;
-    if (!requireString(raw)) {
-      return res.status(400).json({ error: "testsJson is required" });
-    }
-
-    const parsedObject = safeParseJsonObject(raw);
-    const parsedArray = parsedObject ? null : safeParseJsonArrayLoose(raw);
-    const normalized =
-      Array.isArray(parsedArray) ? normalizeLooseIncomingTests({ tests: parsedArray }) : normalizeLooseIncomingTests(parsedObject ?? {});
-
-    const standardized = normalized.map((t) => {
-      const name = toNullOrString(t?.testName);
-      if (!name) return t;
-      const key = canonicalizeTestName(name);
-      const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
-      return { ...t, testName: preferred ?? name };
-    });
-    const buffer = await buildDocsTestsExcelBuffer(standardized);
-
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader("Content-Disposition", 'attachment; filename="docs-tests.xlsx"');
-    res.send(buffer);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+gptRouter.post("/docs-tests-excel", upload.none(), createDocsTestsExcelHandler(getGptControllerContext));
 
 gptRouter.post(
   "/heart-analysis",
@@ -4128,45 +2924,8 @@ gptRouter.post(
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
     { name: "file", maxCount: 1 }
   ]),
-  async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const uploaded = collectUploadedFiles(req);
-    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: "Only PDF files are allowed."
-      });
-    }
-    if (pdfFiles.length === 0) {
-      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
-    }
-
-    const extractedText = await extractPdfTextForPrompt(pdfFiles);
-    const incoming = await extractHeartRelatedTestsFromPdfs({
-      openai,
-      pdfFiles,
-      extractedText,
-      provider
-    });
-
-    const heartTests = Array.isArray(incoming) ? incoming : [];
-    const heart = { data: heartTests.length > 0, tests: heartTests };
-    res.json({ heart });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+  createHeartAnalysisHandler(getGptControllerContext)
+);
 
 gptRouter.post(
   "/urine-analysis",
@@ -4174,53 +2933,8 @@ gptRouter.post(
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
     { name: "file", maxCount: 1 }
   ]),
-  async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const uploaded = collectUploadedFiles(req);
-    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
-    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter(
-      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
-    );
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: "Only PDF, DOCX, and image files are allowed."
-      });
-    }
-    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
-      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
-    }
-
-    const pdfText = await extractPdfTextForPrompt(pdfFiles);
-    const docxText = await extractDocxTextForPrompt(docxFiles);
-    const extractedText = `${pdfText}${docxText}`;
-    const incoming = await extractUrinogramTestsFromPdfs({
-      openai,
-      pdfFiles,
-      imageFiles,
-      extractedText,
-      provider
-    });
-
-    const tests = buildCompleteUrinogramTests(incoming);
-    const hasAny = tests.some((t) => t?.status !== "Not included in the PDF");
-    const urine = { data: hasAny, tests };
-    res.json({ urine, chunkIndex: 0, totalChunks: 1, chunkSize: tests.length });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+  createUrineAnalysisHandler(getGptControllerContext)
+);
 
 gptRouter.post(
   "/blood-analysis",
@@ -4228,119 +2942,8 @@ gptRouter.post(
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
     { name: "file", maxCount: 1 }
   ]),
-  async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
-
-    const debugAi = process.env.AI_DEBUG === "1";
-
-    const uploaded = collectUploadedFiles(req);
-    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const docxFiles = uploaded.filter((f) => isDocxMime(f?.mimetype));
-    const imageFiles = uploaded.filter((f) => isImageMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter(
-      (f) => !isPdfMime(f?.mimetype) && !isDocxMime(f?.mimetype) && !isImageMime(f?.mimetype)
-    );
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: "Only PDF, DOCX, and image files are allowed."
-      });
-    }
-    if (pdfFiles.length + docxFiles.length + imageFiles.length === 0) {
-      return res.status(400).json({ error: "Upload file(s) as field name 'files'." });
-    }
-
-    const { chunkIndex } = getChunkParams(req);
-
-    const pdfText = await extractPdfTextForBloodPrompt(pdfFiles);
-    const docxText = await extractDocxTextForBloodPrompt(docxFiles);
-    const extractedText = `${pdfText}${docxText}`;
-
-    if (!requireString(extractedText)) {
-      if (provider === "claude" && imageFiles.length === 0) {
-        return res.status(400).json({
-          error:
-            "Claude could not extract tests because this PDF has no readable text. Please upload images (JPG/PNG) of the report pages or use GPT for scanned PDFs."
-        });
-      }
-      const blood = { data: false, tests: [] };
-      const payload = { blood, chunkIndex: 0, totalChunks: 1, chunkSize: 1, hasMore: false };
-      if (debugAi) {
-        payload.debug = {
-          provider,
-          extractedTextLength: 0,
-          chunkTextLength: 0,
-          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
-          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
-          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0
-        };
-      }
-      return res.json(payload);
-    }
-
-    const { safeIndex, totalChunks, chunkText, chunkSize } = sliceTextFixed(extractedText, chunkIndex, 4);
-
-    const extraction =
-      imageFiles.length > 0
-        ? await extractAllBloodParametersFromImagesAndText({
-          openai,
-          imageFiles,
-          extractedText: chunkText,
-          provider,
-          debug: debugAi
-        })
-        : await extractAllBloodParametersFromText({ openai, extractedText: chunkText, provider, debug: debugAi });
-
-    const incomingTests = Array.isArray(extraction?.tests) ? extraction.tests : [];
-    const merged = mergeTestEntries([], incomingTests);
-    if (provider === "claude" && merged.length === 0) {
-      const raw = typeof extraction?.raw === "string" ? extraction.raw : "";
-      const payload = {
-        error:
-          "Claude returned no parsable tests for this chunk. This usually happens when the response was truncated or not valid JSON. Enable AI_DEBUG=1 to see the response preview, or try the next chunk / use images."
-      };
-      if (debugAi) {
-        payload.debug = {
-          provider,
-          extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
-          chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
-          pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
-          docxTextLength: typeof docxText === "string" ? docxText.length : 0,
-          imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
-          aiResponsePreview: raw ? raw.slice(0, 2000) : null
-        };
-      }
-      return res.status(502).json(payload);
-    }
-    const hasAny = merged.length > 0;
-    const blood = { data: hasAny, tests: merged };
-    const payload = { blood, chunkIndex: safeIndex, totalChunks, chunkSize, hasMore: safeIndex + 1 < totalChunks };
-    if (debugAi) {
-      const raw = typeof extraction?.raw === "string" ? extraction.raw : "";
-      payload.debug = {
-        provider,
-        extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
-        chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
-        pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
-        docxTextLength: typeof docxText === "string" ? docxText.length : 0,
-        imageCount: Array.isArray(imageFiles) ? imageFiles.length : 0,
-        extractedTests: merged.length,
-        aiResponsePreview: raw ? raw.slice(0, 2000) : null
-      };
-    }
-    res.json(payload);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+  createBloodAnalysisHandler(getGptControllerContext)
+);
 
 gptRouter.post(
   "/other-analysis",
@@ -4348,64 +2951,69 @@ gptRouter.post(
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
     { name: "file", maxCount: 1 }
   ]),
-  async (req, res) => {
-  try {
-    const provider = getAiProviderFromReq(req);
-    const openai = provider === "openai" ? getOpenAIClient() : null;
-    if (provider === "openai" && !openai) {
-      return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
-    }
-    if (provider === "claude" && !hasAnthropicKey()) {
-      return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set" });
-    }
+  createOtherAnalysisHandler(getGptControllerContext)
+);
 
-    const uploaded = collectUploadedFiles(req);
-    const pdfFiles = uploaded.filter((f) => isPdfMime(f?.mimetype));
-    const unsupportedFiles = uploaded.filter((f) => !isPdfMime(f?.mimetype));
-    if (unsupportedFiles.length > 0) {
-      return res.status(400).json({
-        error: "Only PDF files are allowed."
-      });
-    }
-    if (pdfFiles.length === 0) {
-      return res.status(400).json({ error: "Upload PDF(s) as field name 'files'." });
-    }
+let _gptControllerContext = null;
 
-    const { chunkIndex } = getChunkParams(req);
-    const { safeIndex, totalChunks, chunkSize, chunk } = sliceChunkFixed(
-      OTHER_ANALYSIS_EXTRACT_TESTS,
-      chunkIndex,
-      4
-    );
-
-    const extractedText = await extractPdfTextForPrompt(pdfFiles);
-    const incoming = await extractTestsFromPdfs({
-      openai,
-      pdfFiles,
-      extractedText,
-      testNames: chunk,
-      provider
-    });
-
-    const strict = buildStrictCategory(chunk, { tests: incoming });
-    const notIncludedText = "NOT INCLUDED ";
-    const tests = (Array.isArray(strict?.tests) ? strict.tests : []).map((t) => {
-      const status = String(t?.status || "").toUpperCase();
-      const missing = status === "NOT_PRESENTED" || status === "NOT_FOUND";
-      if (!missing) return t;
-      return {
-        ...t,
-        value: notIncludedText,
-        unit: null,
-        referenceRange: null,
-        status: notIncludedText
-      };
-    });
-
-    const other = { data: strict?.data === true, tests };
-    res.json({ other, chunkIndex: safeIndex, totalChunks, chunkSize });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: message });
-  }
-});
+function getGptControllerContext() {
+  if (_gptControllerContext) return _gptControllerContext;
+  _gptControllerContext = {
+    requireString,
+    getOpenAIClient,
+    getAiProviderFromReq,
+    hasAnthropicKey,
+    getTextFromAnthropicMessageResponse,
+    anthropicCreateJsonMessage,
+    parseMaybeJson,
+    parseMaybeNumber,
+    getTextFromMessageContent,
+    getTextFromResponsesOutput,
+    isImageMime,
+    isPdfMime,
+    isDocxMime,
+    collectUploadedFiles,
+    extractPdfTextRawForPrompt,
+    extractPdfTextForPrompt,
+    extractPdfTextForBloodPrompt,
+    extractDocxTextForPrompt,
+    extractDocxTextForBloodPrompt,
+    safeParseJsonObject,
+    safeParseJsonObjectLoose,
+    safeParseJsonArrayLoose,
+    stripBrandingFromAdvancedBodyCompositionPayload,
+    toNullOrString,
+    canonicalizeTestName,
+    PARAMETER_TESTS_PREFERRED,
+    normalizeLooseIncomingTests,
+    buildDocsTestsExcelBuffer,
+    getChunkParams,
+    estimateTotalTestsInReportText,
+    sliceTextFixedWithOverlap,
+    splitTextWindows,
+    extractDocsTestsFromImagesAndText,
+    extractDocsTestsFromText,
+    mergeTestEntries,
+    isMissingDocsTestsField,
+    filterDocsTestsToMedicalOnly,
+    heuristicExtractDocsTestsFromText,
+    cleanDocsTestsWithAi,
+    extractHeartRelatedTestsFromPdfs,
+    extractUrinogramTestsFromPdfs,
+    chunkArray,
+    mapWithConcurrency,
+    PARAMETER_TESTS_FOR_EXTRACTION,
+    extractTestsFromPdfs,
+    buildCompleteUrinogramTests,
+    buildPresentedCategory,
+    BLOOD_PARAMETER_TESTS,
+    OTHER_PARAMETER_TESTS,
+    sliceTextFixed,
+    extractAllBloodParametersFromImagesAndText,
+    extractAllBloodParametersFromText,
+    sliceChunkFixed,
+    OTHER_ANALYSIS_EXTRACT_TESTS,
+    buildStrictCategory
+  };
+  return _gptControllerContext;
+}
