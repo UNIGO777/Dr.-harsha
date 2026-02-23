@@ -1025,6 +1025,29 @@ function canonicalizeTestName(name) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function canonicalizeDocsTestsMergeKey(name) {
+  const base = canonicalizeTestName(name);
+  if (!base) return "";
+  const stripped = base.replace(
+    /(icpms|icp|ms|hplc|elisa|clia|eclia|photometry|colorimetry|turbidimetry|technology|method|calculated)/g,
+    ""
+  );
+  return stripped || base;
+}
+
+function stripDocsTestsMethodSuffix(name) {
+  if (!requireString(name)) return null;
+  const raw = String(name).trim();
+  if (!raw) return null;
+  const withoutAngles = raw.replace(/[<>]+/g, " ").trim();
+  const cut = withoutAngles.replace(
+    /\b(icp\s*-?\s*ms|hplc|elisa|clia|eclia|photometry|colorimetry|turbidimetry|technology|method)\b.*$/i,
+    ""
+  );
+  const cleaned = String(cut || withoutAngles).trim();
+  return cleaned || raw;
+}
+
 function uniqueTestNames(list) {
   const out = [];
   const seen = new Set();
@@ -1839,13 +1862,13 @@ function mergeTestEntries(existing, incoming) {
 
   const map = new Map();
   for (const t of existing) {
-    const key = canonicalizeTestName(t?.testName);
+    const key = canonicalizeDocsTestsMergeKey(t?.testName);
     if (!key) continue;
     map.set(key, t);
   }
 
   for (const t of incoming) {
-    const key = canonicalizeTestName(t?.testName);
+    const key = canonicalizeDocsTestsMergeKey(t?.testName);
     if (!key) continue;
     const prev = map.get(key);
     if (!prev) {
@@ -2101,7 +2124,7 @@ function mergeAndDedupeCleanedTestsByName(tests) {
   for (const t of list) {
     if (!t || typeof t !== "object" || Array.isArray(t)) continue;
     const testName = toNullOrString(t?.testName);
-    const key = canonicalizeTestName(testName);
+    const key = canonicalizeDocsTestsMergeKey(testName);
     if (!key) {
       passthrough.push(t);
       continue;
@@ -2111,7 +2134,7 @@ function mergeAndDedupeCleanedTestsByName(tests) {
     if (!prev) {
       const results = mergeResults([], t?.results);
       const value = isMissingDocsTestsField(t?.value) ? null : toNullOrString(t?.value);
-      map.set(key, { ...t, value, results });
+      map.set(key, { ...t, testName: stripDocsTestsMethodSuffix(testName) ?? testName, value, results });
       continue;
     }
 
@@ -2126,7 +2149,14 @@ function mergeAndDedupeCleanedTestsByName(tests) {
     const merged = {
       ...prev,
       ...t,
-      testName: prev?.testName ?? t?.testName,
+      testName: (() => {
+        const a = toNullOrString(prev?.testName);
+        const b = toNullOrString(t?.testName);
+        const aa = stripDocsTestsMethodSuffix(a) ?? a;
+        const bb = stripDocsTestsMethodSuffix(b) ?? b;
+        if (aa && bb) return String(aa).length <= String(bb).length ? aa : bb;
+        return bb ?? aa ?? null;
+      })(),
       results: mergedResults,
       value,
       unit: pickBestText(prev?.unit, t?.unit),
@@ -2147,12 +2177,46 @@ function mergeAndDedupeCleanedTestsByName(tests) {
   }
 
   const mergedList = [...passthrough, ...Array.from(map.values())];
-  return mergedList;
+  return mergedList.filter((t) => {
+    const hasValue = !isMissingDocsTestsField(t?.value);
+    const hasResult =
+      Array.isArray(t?.results) && t.results.some((r) => !isMissingDocsTestsField(r?.value));
+    const hasRange = !isMissingDocsTestsField(t?.referenceRange);
+    return hasValue || hasResult || hasRange;
+  });
 }
 
 async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
   const list = Array.isArray(tests) ? tests : [];
   if (list.length === 0) return { tests: [] };
+
+  const normalizeDateKey = (v) => {
+    const s = typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim();
+    return s ? s.toLowerCase() : "";
+  };
+  const buildOriginalResultsMap = (incoming) => {
+    const map = new Map();
+    for (const t of Array.isArray(incoming) ? incoming : []) {
+      const key = canonicalizeDocsTestsMergeKey(t?.testName);
+      if (!key) continue;
+      const prev = map.get(key) ?? [];
+      const results = Array.isArray(t?.results) ? t.results : [];
+      if (results.length > 0) {
+        for (const r of results) {
+          const value = toNullOrString(r?.value);
+          if (isMissingDocsTestsField(value)) continue;
+          const dateAndTime = toNullOrString(r?.dateAndTime);
+          prev.push({ value, dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim() });
+        }
+      } else {
+        const value = toNullOrString(t?.value);
+        if (!isMissingDocsTestsField(value)) prev.push({ value, dateAndTime: null });
+      }
+      map.set(key, prev);
+    }
+    return map;
+  };
+  const originalResultsByKey = buildOriginalResultsMap(list);
 
   const dictionaryText = bulletList(PARAMETER_TESTS);
   const dictionaryPrompt = capTextForPrompt(dictionaryText, 12000);
@@ -2189,10 +2253,12 @@ Do not add extra fields.`;
 Your job:
 - Identify and extract ONLY real medical test entries (lab parameters).
 - Clean and normalize the data.
-- there is some times the iron tests comming more then 1 time if after one time it come and have no pera meter like all value in that are not presented so remove it 
 - Remove explanatory paragraphs and irrelevant text.
 - Standardize status values (Normal, High, Low, Absent, Present).
-- Keep the original numeric value and unit exactly as given.
+- Preserve values EXACTLY as provided in the input rows:
+  - Copy each "results[].value" character-for-character (do not round, do not change decimal places, do not drop trailing zeros).
+  - Preserve comparison symbols like "<", ">", "≤", "≥" when they are part of the value or referenceRange.
+  - Do NOT move "Technology/Method" text (e.g., "ICP-MS", "HPLC") into testName, value, unit, or referenceRange.
 - If the result says "ABSENT", store result as "Absent".
 - Drop rows that are NOT medical tests (interpretation / classification / ranges / labels / address blocks).
 - Examples of rows to DROP: "Normal", "Prediabetic", "Good Control", "Fair Control", "Unsatisfactory Control", "c values", "to 125 mg/dl", "or higher", and pure range/category lines.
@@ -2200,6 +2266,7 @@ Your job:
 - Test name normalization is critical:
   - Replace long/verbose titles with a concise industry-standard test name.
   - Do NOT include units, reference ranges, or extra explanatory words inside testName.
+  - Do NOT include technology/method terms (e.g., "ICP-MS", "HPLC", "ELISA") inside testName.
   - Prefer 1–3 words when possible, but if the industry-standard name is longer, keep the standard name.
   - If the test exists in the dictionary, set testName to EXACTLY one of the dictionary test names (copy spelling as-is) and pick the shortest standard variant.
   - If the test does not exist in the dictionary, keep the original testName unchanged (do not invent a new name).
@@ -2211,6 +2278,10 @@ Your job:
    - If you see the same testName multiple times with different dateAndTime, merge them under the same testName with multiple "results" entries.
    - If dateAndTime is missing, set it to null.
    - Do NOT invent dates/times.
+ - Deduplication rules (IMPORTANT):
+   - Within each category, do NOT output duplicate testName rows. If the same testName appears multiple times, merge into ONE row.
+   - Do NOT output placeholder rows where value is missing/"not presented"/"not found"/"NA" and referenceRange is missing/"not presented".
+   - If you see a duplicate testName where one row has a real value and another row is "not presented", keep ONLY the real one (merge results if needed).
 
 Medical dictionary (valid test names):
 ${dictionaryPrompt}
@@ -2300,15 +2371,53 @@ Return clean JSON ONLY with this structure:
         testName: (() => {
           const raw = toNullOrString(t?.testName);
           if (!raw) return raw;
-          const key = canonicalizeTestName(raw);
+          const stripped = stripDocsTestsMethodSuffix(raw) ?? raw;
+          const key = canonicalizeTestName(stripped);
           const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
-          return preferred ?? raw;
+          return preferred ?? stripped;
         })()
       }));
       const filtered = filterDocsTestsToMedicalTestsNoInterpretation(normalized);
       const deduped = mergeAndDedupeCleanedTestsByName(filtered);
       if (deduped.length === 0) return null;
-      return { categoryName: name || "Other Tests", tests: deduped };
+      const hydrated = deduped.map((t) => {
+        const key = canonicalizeDocsTestsMergeKey(t?.testName);
+        const originalResults = key ? originalResultsByKey.get(key) : null;
+        if (!key || !Array.isArray(originalResults) || originalResults.length === 0) return t;
+
+        const byDate = new Map();
+        const push = (r, source) => {
+          if (!r || typeof r !== "object" || Array.isArray(r)) return;
+          const value = toNullOrString(r?.value);
+          if (isMissingDocsTestsField(value)) return;
+          const dateAndTime = toNullOrString(r?.dateAndTime);
+          const dateKey = normalizeDateKey(dateAndTime);
+          const prev = byDate.get(dateKey) ?? { original: [], ai: [] };
+          const entry = {
+            value,
+            dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim()
+          };
+          if (source === "original") prev.original.push(entry);
+          else prev.ai.push(entry);
+          byDate.set(dateKey, prev);
+        };
+
+        for (const r of Array.isArray(t?.results) ? t.results : []) push(r, "ai");
+        for (const r of originalResults) push(r, "original");
+
+        const mergedResults = [];
+        for (const entry of byDate.values()) {
+          if (entry.original.length > 0) mergedResults.push(...entry.original);
+          else mergedResults.push(...entry.ai);
+        }
+
+        const nextValue =
+          mergedResults.length > 0 ? toNullOrString(mergedResults[mergedResults.length - 1]?.value) : toNullOrString(t?.value);
+
+        return { ...t, results: mergedResults, value: nextValue ?? null };
+      });
+
+      return { categoryName: name || "Other Tests", tests: mergeAndDedupeCleanedTestsByName(hydrated) };
     })
     .filter(Boolean);
 
@@ -2625,7 +2734,14 @@ Row validity rules:
 - Each row MUST have an observed value for that parameter.
 - Ignore serial numbers / row indices.
 - Do NOT invent missing tests.
-- Keep the observed value text exactly as written.
+- Keep the observed value text exactly as written (do not round, do not change decimal places, do not drop trailing zeros).
+- If the report shows symbols like "<", ">", "≤", "≥" as part of value or referenceRange, keep them exactly.
+- If value is missing or says "not presented"/"not found"/"NA", do NOT include that row.
+- If the report is in a table with columns like "TEST NAME | TECHNOLOGY/METHOD | VALUE | UNITS | REFERENCE RANGE":
+  - testName must come ONLY from the test name column (no technology/method text inside testName).
+  - unit must come ONLY from the units column (no test name or technology/method concatenated).
+  - referenceRange must come ONLY from the reference range column.
+  - If you need to keep technology/method, put it in section or remarks (not in testName/unit/value/referenceRange).
 - If unit/referenceRange/section/page/remarks are missing, set them to null.
 - If you are unsure whether a row is a medical test, exclude it.
 
@@ -2760,7 +2876,14 @@ Row validity rules:
 - Each row MUST have an observed value for that parameter.
 - Ignore serial numbers / row indices.
 - Do NOT invent missing tests.
-- Keep the observed value text exactly as written.
+- Keep the observed value text exactly as written (do not round, do not change decimal places, do not drop trailing zeros).
+- If the report shows symbols like "<", ">", "≤", "≥" as part of value or referenceRange, keep them exactly.
+- If value is missing or says "not presented"/"not found"/"NA", do NOT include that row.
+- If the report is in a table with columns like "TEST NAME | TECHNOLOGY/METHOD | VALUE | UNITS | REFERENCE RANGE":
+  - testName must come ONLY from the test name column (no technology/method text inside testName).
+  - unit must come ONLY from the units column (no test name or technology/method concatenated).
+  - referenceRange must come ONLY from the reference range column.
+  - If you need to keep technology/method, put it in section or remarks (not in testName/unit/value/referenceRange).
 - If unit/referenceRange/section/page/remarks are missing, set them to null.
 - Do NOT skip any row in any RESULTS table.
 - If you are unsure whether a row is a medical test, exclude it.
@@ -3868,7 +3991,12 @@ gptRouter.post(
 
     const heuristicTests = heuristicExtractDocsTestsFromText(chunkText);
     const merged = mergeTestEntries(aiIncoming, heuristicTests);
-    const chunkTests = merged.filter((t) => toNullOrString(t?.value) != null);
+    const chunkTests = merged.filter((t) => {
+      const hasValue = !isMissingDocsTestsField(t?.value);
+      const hasResult =
+        Array.isArray(t?.results) && t.results.some((r) => !isMissingDocsTestsField(r?.value));
+      return hasValue || hasResult;
+    });
     const filteredChunkTests = filterDocsTestsToMedicalOnly(chunkTests);
 
     if (provider === "claude" && filteredChunkTests.length === 0) {
