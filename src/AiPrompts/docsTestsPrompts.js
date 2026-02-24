@@ -8,6 +8,12 @@ Date/time handling:
 - Use that same date/time for every extracted test result in this document.
 - If date/time is not found, set dateAndTime = null.
 - Do NOT invent date/time.
+- Deduplicate repeated results:
+  - If the same testName appears multiple times on the SAME DATE with the SAME value (even if the time differs), include it ONLY ONCE.
+  - If the same testName appears multiple times on the SAME DATE with DIFFERENT values, include multiple results entries.
+  - When deduplicating duplicates on the same date, keep only the first occurrence (earliest time if available).
+ - Output each testName ONLY ONCE in the final JSON:
+   - If the same testName appears in multiple places in the report, merge into a single test object with multiple "results" entries (after applying the same-date dedup rule).
 
 Hard exclusions (do NOT extract these even if they contain numbers):
 - Patient details: name, age, sex, address, phone, email
@@ -35,7 +41,7 @@ Row validity rules:
 Self-audit before returning JSON:
 - Remove any non-medical rows (especially addresses/IDs).
 - Double-check that each value is copied exactly from the report text.
-- Verify LOW/HIGH is only set when supported by referenceRange.
+- Verify LOW/HIGH is only set when supported by referenceRange for each result.
 
 Return ONLY valid JSON with this structure (no extra wrapper text):
 {
@@ -54,11 +60,10 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
     {
       "testName": string,
       "results": [
-        { "value": string, "dateAndTime": string|null }
+        { "value": string, "dateAndTime": string|null, "status": "LOW"|"HIGH"|"NORMAL" }
       ],
       "unit": string|null,
       "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
       "section": string|null,
       "page": number|null,
       "remarks": string|null
@@ -76,6 +81,12 @@ Date/time handling:
 - Use that same date/time for every extracted test result in this document.
 - If date/time is not found, set dateAndTime = null.
 - Do NOT invent date/time.
+- Deduplicate repeated results:
+  - If the same testName appears multiple times on the SAME DATE with the SAME value (even if the time differs), include it ONLY ONCE.
+  - If the same testName appears multiple times on the SAME DATE with DIFFERENT values, include multiple results entries.
+  - When deduplicating duplicates on the same date, keep only the first occurrence (earliest time if available).
+ - Output each testName ONLY ONCE in the final JSON:
+   - If the same testName appears in multiple pages/sections, merge into a single test object with multiple "results" entries (after applying the same-date dedup rule).
 
 Hard exclusions (do NOT extract these even if they contain numbers):
 - Patient details: name, age, sex, address, phone, email
@@ -104,7 +115,7 @@ Row validity rules:
 Self-audit before returning JSON:
 - Remove any non-medical rows (especially addresses/IDs).
 - Double-check that each value is copied exactly as written from the report.
-- Verify LOW/HIGH is only set when supported by referenceRange.
+- Verify LOW/HIGH is only set when supported by referenceRange for each result.
 
 Return ONLY valid JSON with this structure (no extra wrapper text):
 {
@@ -123,11 +134,10 @@ Return ONLY valid JSON with this structure (no extra wrapper text):
     {
       "testName": string,
       "results": [
-        { "value": string, "dateAndTime": string|null }
+        { "value": string, "dateAndTime": string|null, "status": "LOW"|"HIGH"|"NORMAL" }
       ],
       "unit": string|null,
       "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
       "section": string|null,
       "page": number|null,
       "remarks": string|null
@@ -142,10 +152,9 @@ export const DOCS_TESTS_SCHEMA_HINT = `Schema:
   "tests": [
     {
       "testName": string,
-      "results": [{ "value": string, "dateAndTime": string|null }],
+      "results": [{ "value": string, "dateAndTime": string|null, "status": "LOW"|"HIGH"|"NORMAL" }],
       "unit": string|null,
       "referenceRange": string|null,
-      "status": "LOW"|"HIGH"|"NORMAL",
       "section": string|null,
       "page": number|null,
       "remarks": string|null

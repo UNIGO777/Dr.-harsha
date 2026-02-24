@@ -1596,7 +1596,7 @@ function normalizeLooseIncomingTests(incoming) {
             if (typeof r === "string" || typeof r === "number") {
               const v = toNullOrString(r);
               if (!v) return null;
-              return { value: v, dateAndTime: null };
+              return { value: v, dateAndTime: null, status: null };
             }
             if (typeof r !== "object" || Array.isArray(r)) return null;
             const v =
@@ -1612,7 +1612,8 @@ function normalizeLooseIncomingTests(incoming) {
               normalizeDateTime(r?.date) ??
               normalizeDateTime(r?.time) ??
               null;
-            return { value: v, dateAndTime };
+            const status = toNullOrString(r?.status) ?? toNullOrString(r?.Status) ?? null;
+            return { value: v, dateAndTime, status };
           })
           .filter(Boolean);
       };
@@ -1626,11 +1627,18 @@ function normalizeLooseIncomingTests(incoming) {
       const referenceRange =
         toNullOrString(t?.referenceRange) ?? toNullOrString(t?.reference_range) ?? toNullOrString(t?.range);
       const status = toNullOrString(t?.status);
-      const computed = computeStatus({ value, referenceRange, fallbackStatus: status });
+      const computedResults = results.map((r) => ({
+        ...r,
+        status: computeStatus({ value: r?.value, referenceRange, fallbackStatus: toNullOrString(r?.status) ?? status })
+      }));
+      const computed =
+        computedResults.length > 0
+          ? toNullOrString(computedResults[computedResults.length - 1]?.status)
+          : computeStatus({ value, referenceRange, fallbackStatus: status });
       const section = toNullOrString(t?.section);
       const page = typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null;
       const remarks = toNullOrString(t?.remarks);
-      return { testName, value, results, unit, referenceRange, status: computed, section, page, remarks };
+      return { testName, value, results: computedResults, unit, referenceRange, status: computed, section, page, remarks };
     })
     .filter(Boolean);
 }
@@ -1729,7 +1737,11 @@ function mergeTestEntries(existing, incoming) {
       const key = `${normalizeDateKey(dateAndTime)}|${String(value).trim().toLowerCase()}`;
       if (seen.has(key)) return;
       seen.add(key);
-      out.push({ value, dateAndTime: dateAndTime ? String(dateAndTime).trim() : null });
+      out.push({
+        value,
+        dateAndTime: dateAndTime ? String(dateAndTime).trim() : null,
+        status: toNullOrString(r?.status)
+      });
     };
     for (const r of Array.isArray(a) ? a : []) push(r);
     for (const r of Array.isArray(b) ? b : []) push(r);
@@ -1748,7 +1760,19 @@ function mergeTestEntries(existing, incoming) {
     if (!key) continue;
     const prev = map.get(key);
     if (!prev) {
-      map.set(key, t);
+      const rr = toNullOrString(t?.referenceRange);
+      const baseResults = Array.isArray(t?.results) ? t.results : [];
+      const computedResults = baseResults.map((r) => ({
+        value: toNullOrString(r?.value),
+        dateAndTime: toNullOrString(r?.dateAndTime),
+        status: computeStatus({ value: toNullOrString(r?.value), referenceRange: rr, fallbackStatus: toNullOrString(r?.status) ?? toNullOrString(t?.status) })
+      }));
+      const nextValue = toNullOrString(t?.value) ?? (computedResults.length > 0 ? toNullOrString(computedResults[computedResults.length - 1]?.value) : null);
+      const nextStatus =
+        computedResults.length > 0
+          ? toNullOrString(computedResults[computedResults.length - 1]?.status)
+          : computeStatus({ value: nextValue, referenceRange: rr, fallbackStatus: toNullOrString(t?.status) });
+      map.set(key, { ...t, value: nextValue ?? null, results: computedResults, status: nextStatus });
       continue;
     }
     const mergedResults = mergeResults(prev?.results, t?.results);
@@ -1768,6 +1792,22 @@ function mergeTestEntries(existing, incoming) {
         (typeof prev?.page === "number" && Number.isFinite(prev.page) ? prev.page : null),
       remarks: toNullOrString(t?.remarks) ?? toNullOrString(prev?.remarks) ?? null
     };
+
+    const rr = toNullOrString(merged?.referenceRange);
+    const computedResults = (Array.isArray(merged?.results) ? merged.results : []).map((r) => ({
+      value: toNullOrString(r?.value),
+      dateAndTime: toNullOrString(r?.dateAndTime),
+      status: computeStatus({
+        value: toNullOrString(r?.value),
+        referenceRange: rr,
+        fallbackStatus: toNullOrString(r?.status) ?? toNullOrString(t?.status) ?? toNullOrString(prev?.status)
+      })
+    }));
+    merged.results = computedResults;
+    merged.status =
+      computedResults.length > 0
+        ? toNullOrString(computedResults[computedResults.length - 1]?.status)
+        : computeStatus({ value: toNullOrString(merged?.value), referenceRange: rr, fallbackStatus: toNullOrString(merged?.status) });
 
     map.set(key, merged);
   }
@@ -1971,7 +2011,11 @@ function mergeAndDedupeCleanedTestsByName(tests) {
       const key = `${normalizeDateKey(dateAndTime)}|${String(value).trim().toLowerCase()}`;
       if (seen.has(key)) return;
       seen.add(key);
-      out.push({ value: String(value).trim(), dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim() });
+      out.push({
+        value: String(value).trim(),
+        dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim(),
+        status: toNullOrString(r?.status)
+      });
     };
     for (const r of Array.isArray(a) ? a : []) push(r);
     for (const r of Array.isArray(b) ? b : []) push(r);
@@ -2010,7 +2054,17 @@ function mergeAndDedupeCleanedTestsByName(tests) {
     if (!prev) {
       const results = mergeResults([], t?.results);
       const value = isMissingDocsTestsField(t?.value) ? null : toNullOrString(t?.value);
-      map.set(key, { ...t, testName: stripDocsTestsMethodSuffix(testName) ?? testName, value, results });
+      const rr = pickBestText(null, t?.referenceRange);
+      const computedResults = results.map((r) => ({
+        ...r,
+        status: computeStatus({ value: toNullOrString(r?.value), referenceRange: rr, fallbackStatus: toNullOrString(r?.status) ?? toNullOrString(t?.status) })
+      }));
+      const nextValue = value ?? (computedResults.length > 0 ? toNullOrString(computedResults[computedResults.length - 1]?.value) : null);
+      const nextStatus =
+        computedResults.length > 0
+          ? toNullOrString(computedResults[computedResults.length - 1]?.status)
+          : computeStatus({ value: nextValue, referenceRange: rr, fallbackStatus: toNullOrString(t?.status) });
+      map.set(key, { ...t, testName: stripDocsTestsMethodSuffix(testName) ?? testName, value: nextValue, results: computedResults, status: nextStatus });
       continue;
     }
 
@@ -2049,6 +2103,17 @@ function mergeAndDedupeCleanedTestsByName(tests) {
       })()
     };
 
+    const rr = toNullOrString(merged?.referenceRange);
+    const computedResults = (Array.isArray(merged?.results) ? merged.results : []).map((r) => ({
+      ...r,
+      status: computeStatus({ value: toNullOrString(r?.value), referenceRange: rr, fallbackStatus: toNullOrString(r?.status) ?? toNullOrString(merged?.status) })
+    }));
+    merged.results = computedResults;
+    merged.status =
+      computedResults.length > 0
+        ? toNullOrString(computedResults[computedResults.length - 1]?.status)
+        : computeStatus({ value: toNullOrString(merged?.value), referenceRange: rr, fallbackStatus: toNullOrString(merged?.status) });
+
     map.set(key, merged);
   }
 
@@ -2075,6 +2140,8 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
     for (const t of Array.isArray(incoming) ? incoming : []) {
       const key = canonicalizeDocsTestsMergeKey(t?.testName);
       if (!key) continue;
+      const rr = toNullOrString(t?.referenceRange);
+      const testFallbackStatus = toNullOrString(t?.status);
       const prev = map.get(key) ?? [];
       const results = Array.isArray(t?.results) ? t.results : [];
       if (results.length > 0) {
@@ -2082,11 +2149,21 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
           const value = toNullOrString(r?.value);
           if (isMissingDocsTestsField(value)) continue;
           const dateAndTime = toNullOrString(r?.dateAndTime);
-          prev.push({ value, dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim() });
+          prev.push({
+            value,
+            dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim(),
+            status: computeStatus({ value, referenceRange: rr, fallbackStatus: toNullOrString(r?.status) ?? testFallbackStatus })
+          });
         }
       } else {
         const value = toNullOrString(t?.value);
-        if (!isMissingDocsTestsField(value)) prev.push({ value, dateAndTime: null });
+        if (!isMissingDocsTestsField(value)) {
+          prev.push({
+            value,
+            dateAndTime: null,
+            status: computeStatus({ value, referenceRange: rr, fallbackStatus: testFallbackStatus })
+          });
+        }
       }
       map.set(key, prev);
     }
@@ -2102,14 +2179,14 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
       results: Array.isArray(t?.results)
         ? t.results.map((r) => ({
           value: toNullOrString(r?.value),
-          dateAndTime: toNullOrString(r?.dateAndTime)
+          dateAndTime: toNullOrString(r?.dateAndTime),
+          status: toNullOrString(r?.status)
         }))
         : toNullOrString(t?.value)
           ? [{ value: toNullOrString(t?.value), dateAndTime: null }]
           : [],
       unit: toNullOrString(t?.unit),
       referenceRange: toNullOrString(t?.referenceRange),
-      status: toNullOrString(t?.status),
       section: toNullOrString(t?.section),
       page: typeof t?.page === "number" && Number.isFinite(t.page) ? t.page : null,
       remarks: toNullOrString(t?.remarks)
@@ -2169,13 +2246,29 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
       const incomingTests = Array.isArray(c?.tests) ? c.tests : [];
       const normalized = incomingTests.map((t) => ({
         ...t,
-        status: normalizeCleanerStatus(t?.status, t?.value),
         results:
-          Array.isArray(t?.results) && t.results.length > 0
-            ? t.results
-            : toNullOrString(t?.value)
-              ? [{ value: toNullOrString(t?.value), dateAndTime: null }]
-              : [],
+          (() => {
+            const rr = toNullOrString(t?.referenceRange);
+            const base =
+              Array.isArray(t?.results) && t.results.length > 0
+                ? t.results
+                : toNullOrString(t?.value)
+                  ? [{ value: toNullOrString(t?.value), dateAndTime: null, status: toNullOrString(t?.status) }]
+                  : [];
+            return base
+              .map((r) => {
+                const value = toNullOrString(r?.value);
+                if (isMissingDocsTestsField(value)) return null;
+                const dateAndTime = toNullOrString(r?.dateAndTime);
+                const fallback = normalizeCleanerStatus(r?.status ?? t?.status, value);
+                return {
+                  value,
+                  dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim(),
+                  status: computeStatus({ value, referenceRange: rr, fallbackStatus: fallback })
+                };
+              })
+              .filter(Boolean);
+          })(),
         testName: (() => {
           const raw = toNullOrString(t?.testName);
           if (!raw) return raw;
@@ -2183,6 +2276,15 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
           const key = canonicalizeTestName(stripped);
           const preferred = key ? PARAMETER_TESTS_PREFERRED.get(key) : null;
           return preferred ?? stripped;
+        })(),
+        status: (() => {
+          const rr = toNullOrString(t?.referenceRange);
+          const results = Array.isArray(t?.results) ? t.results : [];
+          if (results.length > 0) {
+            const last = results[results.length - 1];
+            return computeStatus({ value: toNullOrString(last?.value), referenceRange: rr, fallbackStatus: toNullOrString(last?.status) ?? toNullOrString(t?.status) });
+          }
+          return computeStatus({ value: toNullOrString(t?.value), referenceRange: rr, fallbackStatus: toNullOrString(t?.status) });
         })()
       }));
       const filtered = filterDocsTestsToMedicalTestsNoInterpretation(normalized);
@@ -2203,7 +2305,8 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
           const prev = byDate.get(dateKey) ?? { original: [], ai: [] };
           const entry = {
             value,
-            dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim()
+            dateAndTime: isMissingDocsTestsField(dateAndTime) ? null : String(dateAndTime).trim(),
+            status: toNullOrString(r?.status)
           };
           if (source === "original") prev.original.push(entry);
           else prev.ai.push(entry);
@@ -2222,7 +2325,16 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
         const nextValue =
           mergedResults.length > 0 ? toNullOrString(mergedResults[mergedResults.length - 1]?.value) : toNullOrString(t?.value);
 
-        return { ...t, results: mergedResults, value: nextValue ?? null };
+        const rr = toNullOrString(t?.referenceRange);
+        const computedResults = mergedResults.map((r) => ({
+          ...r,
+          status: computeStatus({ value: toNullOrString(r?.value), referenceRange: rr, fallbackStatus: toNullOrString(r?.status) ?? toNullOrString(t?.status) })
+        }));
+        const nextStatus =
+          computedResults.length > 0
+            ? toNullOrString(computedResults[computedResults.length - 1]?.status)
+            : computeStatus({ value: nextValue, referenceRange: rr, fallbackStatus: toNullOrString(t?.status) });
+        return { ...t, results: computedResults, value: nextValue ?? null, status: nextStatus };
       });
 
       return { categoryName: name || "Other Tests", tests: mergeAndDedupeCleanedTestsByName(hydrated) };
