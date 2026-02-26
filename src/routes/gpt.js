@@ -23,6 +23,7 @@ import {
   createHeartUrineAnalysisHandler,
   createUrineAnalysisHandler
 } from "../Controllers/HeartUrineController.js";
+import { createUltrasoundAnalysisHandler } from "../Controllers/UltrasoundController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -51,6 +52,7 @@ import { HEART_RELATED_TESTS_SYSTEM_PROMPT, buildHeartRelatedTestsUserPrompt } f
 import { TESTS_FROM_PDFS_SYSTEM_PROMPT, buildTestsFromPdfsUserPrompt } from "../AiPrompts/testsFromPdfsPrompts.js";
 import { buildTestsFromImagesUserPrompt } from "../AiPrompts/testsFromImagesPrompts.js";
 import { URINOGRAM_ANCHOR_TERMS, buildUrinogramUserPrompt } from "../AiPrompts/urinePrompts.js";
+import { ULTRASOUND_ANCHOR_TERMS, buildUltrasoundUserPrompt } from "../AiPrompts/ultrasoundPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -3002,6 +3004,195 @@ async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, ext
   return normalizeUrinogramIncomingTests(parsedJson);
 }
 
+function normalizeUltrasoundStatus(value) {
+  const s = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!s) return "Not included in the PDF";
+  if (s === "n") return "Normal";
+  if (s === "normal") return "Normal";
+  if (s === "y" || s === "yes") return "Normal";
+  if (s === "abnormal") return "Abnormal";
+  if (s === "a") return "Abnormal";
+  if (s.includes("fatty")) return "Abnormal";
+  if (s.includes("not included") || s.includes("not found") || s.includes("not present")) {
+    return "Not included in the PDF";
+  }
+  if (s.includes("absent") || s.includes("nil")) return "Normal";
+  if (s.includes("present")) return "Abnormal";
+  return "Not included in the PDF";
+}
+
+function normalizeUltrasoundItem(value) {
+  const obj = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const status = normalizeUltrasoundStatus(obj?.status ?? obj?.value ?? obj?.result);
+  const details = toNullOrString(obj?.details ?? obj?.remark ?? obj?.remarks ?? obj?.note ?? obj?.notes) ?? "";
+  return { status, details };
+}
+
+function normalizeUltrasoundPvr(value) {
+  const obj = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const status = normalizeUltrasoundStatus(obj?.status ?? obj?.value ?? obj?.result);
+  const details = toNullOrString(obj?.details ?? obj?.remark ?? obj?.remarks ?? obj?.note ?? obj?.notes) ?? "";
+  const rawMl = toNullOrString(obj?.valueMl ?? obj?.value_ml ?? obj?.value ?? obj?.ml ?? obj?.volumeMl ?? obj?.volume_ml) ?? "";
+  const mlMatch = String(rawMl).trim().match(/(\d+(?:\.\d+)?)/);
+  const valueMl = mlMatch?.[1] ?? "";
+  return { status, valueMl, details };
+}
+
+function normalizeUltrasoundOtherFindings(value) {
+  if (Array.isArray(value)) {
+    return value.map((x) => toNullOrString(x)).filter(Boolean);
+  }
+  const s = toNullOrString(value);
+  if (!s) return [];
+  return s
+    .split(/\r?\n|;|,/)
+    .map((x) => String(x).trim())
+    .filter(Boolean);
+}
+
+function normalizeUltrasoundFindings(parsedJson) {
+  const root = parsedJson && typeof parsedJson === "object" ? parsedJson : {};
+  const u = root?.ultrasound && typeof root.ultrasound === "object" ? root.ultrasound : root;
+
+  const liver = normalizeUltrasoundItem(u?.liver);
+  const spleen = normalizeUltrasoundItem(u?.spleen);
+  const rightKidney = normalizeUltrasoundItem(u?.rightKidney ?? u?.right_kidney ?? u?.rk);
+  const leftKidney = normalizeUltrasoundItem(u?.leftKidney ?? u?.left_kidney ?? u?.lk);
+  const gallBladder = normalizeUltrasoundItem(u?.gallBladder ?? u?.gall_bladder ?? u?.gb);
+  const urinaryBladder = normalizeUltrasoundItem(u?.urinaryBladder ?? u?.urinary_bladder ?? u?.ub);
+  const postVoidResidualUrineVolumeMl = normalizeUltrasoundPvr(
+    u?.postVoidResidualUrineVolumeMl ?? u?.post_void_residual_urine_volume_ml ?? u?.post_void_residual ?? u?.pvr
+  );
+  const uterus = normalizeUltrasoundItem(u?.uterus);
+  const ovaries = normalizeUltrasoundItem(u?.ovaries ?? u?.ovary);
+  const prostate = normalizeUltrasoundItem(u?.prostate);
+  const otherFindings = normalizeUltrasoundOtherFindings(u?.otherFindings ?? u?.other_findings ?? u?.other);
+
+  return {
+    liver,
+    spleen,
+    rightKidney,
+    leftKidney,
+    gallBladder,
+    urinaryBladder,
+    postVoidResidualUrineVolumeMl,
+    uterus,
+    ovaries,
+    prostate,
+    otherFindings
+  };
+}
+
+async function extractUltrasoundFindingsFromPdfs({
+  openai,
+  pdfFiles,
+  imageFiles,
+  extractedText,
+  provider
+}) {
+  const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
+  const userPrompt = buildUltrasoundUserPrompt();
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  const pdfList = Array.isArray(pdfFiles) ? pdfFiles : [];
+  const imageList = Array.isArray(imageFiles) ? imageFiles : [];
+
+  if (resolvedProvider === "claude") {
+    const textForPrompt = requireString(extractedText) ? extractedText : await extractPdfTextRawForPrompt(pdfList);
+    const parts = [
+      {
+        type: "text",
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(textForPrompt, 9000, ULTRASOUND_ANCHOR_TERMS)}`
+      }
+    ];
+    for (const f of imageList) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    const content = getTextFromAnthropicMessageResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? {};
+    return normalizeUltrasoundFindings(parsedJson);
+  }
+
+  let content = "";
+  if (requireString(extractedText) && imageList.length === 0) {
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        {
+          role: "user",
+          content: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 9000, ULTRASOUND_ANCHOR_TERMS)}`
+        }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+    const parsedJson = safeParseJsonObject(content) ?? {};
+    return normalizeUltrasoundFindings(parsedJson);
+  }
+
+  if (imageList.length > 0 && pdfList.length === 0) {
+    const contentParts = [
+      {
+        type: "text",
+        text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 7000, ULTRASOUND_ANCHOR_TERMS)}`
+      }
+    ];
+    for (const f of imageList) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    content = completion.choices?.[0]?.message?.content ?? "";
+    const parsedJson = safeParseJsonObject(content) ?? {};
+    return normalizeUltrasoundFindings(parsedJson);
+  }
+
+  const fileParts = pdfList.map((f) => {
+    const base64 = f.buffer.toString("base64");
+    const fileDataUrl = `data:application/pdf;base64,${base64}`;
+    return { type: "input_file", filename: f.originalname || "report.pdf", file_data: fileDataUrl };
+  });
+  const extraText = requireString(extractedText)
+    ? `\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(extractedText, 7000, ULTRASOUND_ANCHOR_TERMS)}`
+    : "";
+  const response = await openai.responses.create({
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature: 0,
+    text: { format: { type: "json_object" } },
+    input: [
+      { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+      {
+        role: "user",
+        content: [...fileParts, { type: "input_text", text: `${userPrompt}${extraText}` }]
+      }
+    ]
+  });
+  content = getTextFromResponsesOutput(response);
+  const parsedJson = safeParseJsonObject(content) ?? {};
+  return normalizeUltrasoundFindings(parsedJson);
+}
+
 gptRouter.post(
   "/advanced-body-composition",
   upload.single("file"),
@@ -3015,6 +3206,15 @@ gptRouter.post(
     { name: "file", maxCount: 1 }
   ]),
   createHeartUrineAnalysisHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/ultrasound-analysis",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createUltrasoundAnalysisHandler(getGptControllerContext)
 );
 
 gptRouter.post(
@@ -3112,6 +3312,7 @@ function getGptControllerContext() {
     cleanDocsTestsWithAi,
     extractHeartRelatedTestsFromPdfs,
     extractUrinogramTestsFromPdfs,
+    extractUltrasoundFindingsFromPdfs,
     chunkArray,
     mapWithConcurrency,
     PARAMETER_TESTS_FOR_EXTRACTION,
