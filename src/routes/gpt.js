@@ -69,6 +69,7 @@ function normalizeAiProvider(value) {
   const v = typeof value === "string" ? value.trim().toLowerCase() : "";
   if (!v) return "openai";
   if (v.includes("claude") || v.includes("anthropic")) return "claude";
+  if (v.includes("gemini") || v.includes("google")) return "gemini";
   if (v.includes("openai") || v.includes("gpt")) return "openai";
   return "openai";
 }
@@ -79,6 +80,15 @@ function getAiProviderFromReq(req) {
 
 function hasAnthropicKey() {
   return requireString(process.env.ANTHROPIC_API_KEY);
+}
+
+function hasGeminiKey() {
+  return requireString(process.env.Gemini_api_key);
+}
+
+function getGeminiModel() {
+  const m = typeof process.env.Gemini_model === "string" ? process.env.Gemini_model.trim() : "";
+  return m || "gemini-2.5-flash";
 }
 
 function getTextFromAnthropicMessageResponse(response) {
@@ -93,6 +103,52 @@ function getTextFromAnthropicMessageResponse(response) {
 function getFetch() {
   if (typeof fetch === "function") return fetch;
   throw new Error("Global fetch is not available. Use Node.js v18+.");
+}
+
+function getTextFromGeminiGenerateContentResponse(response) {
+  const candidates = Array.isArray(response?.candidates) ? response.candidates : [];
+  const parts = Array.isArray(candidates?.[0]?.content?.parts) ? candidates[0].content.parts : [];
+  return parts
+    .map((p) => (p && typeof p.text === "string" ? p.text : ""))
+    .filter((t) => t)
+    .join("\n");
+}
+
+async function geminiGenerateContent({ parts, model, temperature, maxOutputTokens }) {
+  if (!hasGeminiKey()) {
+    throw new Error("Gemini_api_key is not set");
+  }
+
+  const finalModel = requireString(model) ? model : getGeminiModel();
+  const finalParts = Array.isArray(parts) && parts.length > 0 ? parts : [{ text: "" }];
+
+  const res = await getFetch()(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(finalModel)}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-goog-api-key": process.env.Gemini_api_key
+      },
+      body: JSON.stringify({
+        contents: [{ parts: finalParts }],
+        generationConfig: {
+          temperature: Number.isFinite(temperature) ? temperature : 0,
+          maxOutputTokens: Number.isFinite(maxOutputTokens) ? Math.max(256, Math.trunc(maxOutputTokens)) : 4096
+        }
+      })
+    }
+  );
+
+  const json = await res.json().catch(() => null);
+  if (!res.ok) {
+    const message =
+      typeof json?.error?.message === "string" && json.error.message.trim()
+        ? json.error.message
+        : `Gemini request failed (${res.status})`;
+    throw new Error(message);
+  }
+  return json;
 }
 
 async function anthropicCreateJsonMessage({ system, messages, model, temperature, maxTokens }) {
@@ -2201,7 +2257,15 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
 
   const resolvedProvider = normalizeAiProvider(provider);
   let content = "";
-  if (resolvedProvider === "claude") {
+  if (resolvedProvider === "gemini") {
+    const response = await geminiGenerateContent({
+      parts: [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }],
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    content = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
       system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
@@ -2229,7 +2293,9 @@ async function cleanDocsTestsWithAi({ openai, provider, tests, debug }) {
   }
 
   let parsed =
-    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ??
+    (resolvedProvider === "claude" || resolvedProvider === "gemini"
+      ? safeParseJsonObjectLoose(content)
+      : safeParseJsonObject(content)) ??
     safeParseJsonArrayLoose(content) ??
     null;
 
@@ -2355,9 +2421,28 @@ async function extractTestsFromPdfs({ openai, pdfFiles, extractedText, testNames
   const resolvedProvider = normalizeAiProvider(provider);
   const textForPrompt = requireString(extractedText)
     ? extractedText
-    : resolvedProvider === "claude"
+    : resolvedProvider === "claude" || resolvedProvider === "gemini"
       ? await extractPdfTextRawForPrompt(pdfFiles)
       : "";
+
+  if (resolvedProvider === "gemini") {
+    const response = await geminiGenerateContent({
+      parts: [
+        {
+          text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}\n\n[PDF_TEXT]\n${capTextForPrompt(
+            textForPrompt,
+            12000
+          )}`
+        }
+      ],
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    content = getTextFromGeminiGenerateContentResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? safeParseJsonObject(content) ?? {};
+    return normalizeIncomingTests(parsedJson);
+  }
 
   if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
@@ -2421,7 +2506,22 @@ async function extractAllBloodParametersFromText({ openai, extractedText, provid
   const schemaHint = BLOOD_SCHEMA_HINT;
 
   let content = "";
-  if (resolvedProvider === "claude") {
+  if (resolvedProvider === "gemini") {
+    const response = await geminiGenerateContent({
+      parts: [
+        {
+          text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(
+            extractedText,
+            20000
+          )}`
+        }
+      ],
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    content = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
       system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
@@ -2501,7 +2601,22 @@ async function extractDocsTestsFromText({ openai, extractedText, provider, debug
   const schemaHint = DOCS_TESTS_SCHEMA_HINT;
 
   let content = "";
-  if (resolvedProvider === "claude") {
+  if (resolvedProvider === "gemini") {
+    const response = await geminiGenerateContent({
+      parts: [
+        {
+          text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}\n\n[REPORT_TEXT]\n${capTextForPrompt(
+            extractedText,
+            20000
+          )}`
+        }
+      ],
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    content = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
     const response = await anthropicCreateJsonMessage({
       system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [
@@ -2529,7 +2644,9 @@ async function extractDocsTestsFromText({ openai, extractedText, provider, debug
   }
 
   let parsedJson =
-    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ??
+    (resolvedProvider === "claude" || resolvedProvider === "gemini"
+      ? safeParseJsonObjectLoose(content)
+      : safeParseJsonObject(content)) ??
     safeParseJsonArrayLoose(content) ??
     null;
 
@@ -2556,7 +2673,28 @@ async function extractDocsTestsFromImagesAndText({ openai, imageFiles, extracted
 
   let content = "";
 
-  if (resolvedProvider === "claude") {
+  if (resolvedProvider === "gemini") {
+    const parts = [
+      {
+        text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(
+          extractedText,
+          14000
+        )}`
+      }
+    ];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    content = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
     const parts = [{ type: "text", text: `${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPrompt(extractedText, 14000)}` }];
     for (const f of imageFiles) {
       parts.push({
@@ -2596,7 +2734,9 @@ async function extractDocsTestsFromImagesAndText({ openai, imageFiles, extracted
   }
 
   let parsedJson =
-    (resolvedProvider === "claude" ? safeParseJsonObjectLoose(content) : safeParseJsonObject(content)) ??
+    (resolvedProvider === "claude" || resolvedProvider === "gemini"
+      ? safeParseJsonObjectLoose(content)
+      : safeParseJsonObject(content)) ??
     safeParseJsonArrayLoose(content) ??
     null;
 
@@ -2893,6 +3033,35 @@ async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, ext
   const userPrompt = buildUrinogramUserPrompt({ bulletList });
 
   const resolvedProvider = normalizeAiProvider(provider);
+  if (resolvedProvider === "gemini") {
+    const pdfList = Array.isArray(pdfFiles) ? pdfFiles : [];
+    const imageList = Array.isArray(imageFiles) ? imageFiles : [];
+    const textForPrompt = requireString(extractedText) ? extractedText : await extractPdfTextRawForPrompt(pdfList);
+    const parts = [
+      {
+        text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(
+          textForPrompt,
+          8000,
+          URINOGRAM_ANCHOR_TERMS
+        )}`
+      }
+    ];
+    for (const f of imageList) {
+      parts.push({
+        inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    const content = getTextFromGeminiGenerateContentResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? safeParseJsonObject(content) ?? {};
+    return normalizeUrinogramIncomingTests(parsedJson);
+  }
+
   if (resolvedProvider === "claude") {
     const parts = [
       {
@@ -3050,9 +3219,75 @@ function normalizeUltrasoundOtherFindings(value) {
     .filter(Boolean);
 }
 
-function normalizeUltrasoundFindings(parsedJson) {
+function normalizeUltrasoundReportDateString(value) {
+  const raw = toNullOrString(value);
+  if (!raw) return "";
+  const s = raw.trim();
+  if (!s) return "";
+
+  const isoMatch = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+  if (isoMatch) {
+    const yyyy = isoMatch[1];
+    const mm = isoMatch[2].padStart(2, "0");
+    const dd = isoMatch[3].padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const dmyMatch = s.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+  if (dmyMatch) {
+    const dd = dmyMatch[1].padStart(2, "0");
+    const mm = dmyMatch[2].padStart(2, "0");
+    const yyRaw = dmyMatch[3];
+    const yyyy = yyRaw.length === 2 ? `20${yyRaw}` : yyRaw;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const ymdMatch = s.match(/\b(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})\b/);
+  if (ymdMatch) {
+    const yyyy = ymdMatch[1];
+    const mm = ymdMatch[2].padStart(2, "0");
+    const dd = ymdMatch[3].padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  return "";
+}
+
+function extractUltrasoundReportDateFromText(text) {
+  const s = typeof text === "string" ? text : "";
+  if (!s) return "";
+
+  const isoMatch = s.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+  if (isoMatch) {
+    const yyyy = isoMatch[1];
+    const mm = isoMatch[2].padStart(2, "0");
+    const dd = isoMatch[3].padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const dmyMatch = s.match(/\b(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\b/);
+  if (dmyMatch) {
+    const dd = dmyMatch[1].padStart(2, "0");
+    const mm = dmyMatch[2].padStart(2, "0");
+    const yyRaw = dmyMatch[3];
+    const yyyy = yyRaw.length === 2 ? `20${yyRaw}` : yyRaw;
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  return "";
+}
+
+function normalizeUltrasoundFindings(parsedJson, fallbackText) {
   const root = parsedJson && typeof parsedJson === "object" ? parsedJson : {};
   const u = root?.ultrasound && typeof root.ultrasound === "object" ? root.ultrasound : root;
+
+  const reportDate =
+    normalizeUltrasoundReportDateString(
+      u?.reportDate ?? u?.report_date ?? u?.date ?? u?.studyDate ?? u?.study_date ?? root?.reportDate ?? root?.date
+    ) || extractUltrasoundReportDateFromText(fallbackText);
+
+  const reportDetails =
+    toNullOrString(u?.reportDetails ?? u?.report_details ?? u?.summary ?? u?.details ?? u?.impression) ?? "";
 
   const liver = normalizeUltrasoundItem(u?.liver);
   const spleen = normalizeUltrasoundItem(u?.spleen);
@@ -3068,7 +3303,28 @@ function normalizeUltrasoundFindings(parsedJson) {
   const prostate = normalizeUltrasoundItem(u?.prostate);
   const otherFindings = normalizeUltrasoundOtherFindings(u?.otherFindings ?? u?.other_findings ?? u?.other);
 
+  const statuses = [
+    liver.status,
+    spleen.status,
+    rightKidney.status,
+    leftKidney.status,
+    gallBladder.status,
+    urinaryBladder.status,
+    postVoidResidualUrineVolumeMl.status,
+    uterus.status,
+    ovaries.status,
+    prostate.status
+  ];
+  const overallStatus = statuses.includes("Abnormal")
+    ? "Abnormal"
+    : statuses.includes("Normal")
+      ? "Normal"
+      : "Not included in the PDF";
+
   return {
+    reportDate,
+    overallStatus,
+    reportDetails,
     liver,
     spleen,
     rightKidney,
@@ -3097,6 +3353,33 @@ async function extractUltrasoundFindingsFromPdfs({
   const pdfList = Array.isArray(pdfFiles) ? pdfFiles : [];
   const imageList = Array.isArray(imageFiles) ? imageFiles : [];
 
+  if (resolvedProvider === "gemini") {
+    const textForPrompt = requireString(extractedText) ? extractedText : await extractPdfTextRawForPrompt(pdfList);
+    const parts = [
+      {
+        text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}\n\n[EXTRACTED_TEXT]\n${capTextForPromptWithAnchors(
+          textForPrompt,
+          9000,
+          ULTRASOUND_ANCHOR_TERMS
+        )}`
+      }
+    ];
+    for (const f of imageList) {
+      parts.push({
+        inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    const content = getTextFromGeminiGenerateContentResponse(response);
+    const parsedJson = safeParseJsonObjectLoose(content) ?? safeParseJsonObject(content) ?? {};
+    return normalizeUltrasoundFindings(parsedJson, textForPrompt);
+  }
+
   if (resolvedProvider === "claude") {
     const textForPrompt = requireString(extractedText) ? extractedText : await extractPdfTextRawForPrompt(pdfList);
     const parts = [
@@ -3120,7 +3403,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     const content = getTextFromAnthropicMessageResponse(response);
     const parsedJson = safeParseJsonObjectLoose(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson);
+    return normalizeUltrasoundFindings(parsedJson, textForPrompt);
   }
 
   let content = "";
@@ -3139,7 +3422,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     content = completion.choices?.[0]?.message?.content ?? "";
     const parsedJson = safeParseJsonObject(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson);
+    return normalizeUltrasoundFindings(parsedJson, extractedText);
   }
 
   if (imageList.length > 0 && pdfList.length === 0) {
@@ -3165,7 +3448,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     content = completion.choices?.[0]?.message?.content ?? "";
     const parsedJson = safeParseJsonObject(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson);
+    return normalizeUltrasoundFindings(parsedJson, extractedText);
   }
 
   const fileParts = pdfList.map((f) => {
@@ -3190,7 +3473,7 @@ async function extractUltrasoundFindingsFromPdfs({
   });
   content = getTextFromResponsesOutput(response);
   const parsedJson = safeParseJsonObject(content) ?? {};
-  return normalizeUltrasoundFindings(parsedJson);
+  return normalizeUltrasoundFindings(parsedJson, extractedText);
 }
 
 gptRouter.post(
@@ -3275,8 +3558,12 @@ function getGptControllerContext() {
     getOpenAIClient,
     getAiProviderFromReq,
     hasAnthropicKey,
+    hasGeminiKey,
+    getGeminiModel,
     getTextFromAnthropicMessageResponse,
+    getTextFromGeminiGenerateContentResponse,
     anthropicCreateJsonMessage,
+    geminiGenerateContent,
     parseMaybeJson,
     parseMaybeNumber,
     getTextFromMessageContent,

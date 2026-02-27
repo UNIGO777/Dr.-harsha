@@ -8,17 +8,22 @@ export function createGptChatOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         parseMaybeJson,
         requireString,
         getTextFromMessageContent,
         parseMaybeNumber,
         isImageMime,
         isPdfMime,
-        isDocxMime
+        isDocxMime,
+        geminiGenerateContent,
+        getTextFromGeminiGenerateContentResponse,
+        getGeminiModel
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -104,6 +109,33 @@ export function createGptChatOpenAIHandler(getContext) {
         finalMessages[lastIndex] = { ...finalMessages[lastIndex], content: contentParts };
       } else {
         finalMessages.push({ role: "user", content: contentParts });
+      }
+
+      if (provider === "gemini") {
+        const parts = [
+          {
+            text: `${baseText}${pdfText}${docxText}`
+          }
+        ];
+        for (const f of imageFiles) {
+          parts.push({
+            inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") }
+          });
+        }
+        const response = await geminiGenerateContent({
+          parts,
+          model: requireString(model) ? model : getGeminiModel(),
+          temperature: parseMaybeNumber(temperature) ?? 0.2,
+          maxOutputTokens: 4096
+        });
+        const content = getTextFromGeminiGenerateContentResponse(response);
+        res.json({
+          id: null,
+          model: requireString(model) ? model : getGeminiModel(),
+          content,
+          usage: null
+        });
+        return;
       }
 
       const completion = await openai.chat.completions.create({

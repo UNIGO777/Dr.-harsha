@@ -3,6 +3,7 @@ export const ULTRASOUND_ANCHOR_TERMS = [
   "USG",
   "ABDOMEN",
   "WHOLE ABDOMEN",
+  "DATE",
   "LIVER",
   "SPLEEN",
   "KIDNEY",
@@ -28,6 +29,8 @@ If a field is not present in the report, set its status to "Not included in the 
 Strict JSON format:
 {
   "ultrasound": {
+    "reportDate": "",
+    "reportDetails": "",
     "liver": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
     "spleen": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
     "rightKidney": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
@@ -47,6 +50,8 @@ Strict JSON format:
 }
 
 Rules:
+- reportDate should be the study/report date if present. Prefer "YYYY-MM-DD". If unclear, leave it as "".
+- reportDetails should be a short patient-friendly summary of the ultrasound report (2-6 lines). If everything is normal, say it clearly.
 - Status must be exactly one of: "Normal", "Abnormal", "Not included in the PDF"
 - Put important abnormal findings in details (example: "fatty liver", "grade 2 fatty liver", "umbilical hernia", etc.)
 - If the report contains other ultrasound findings not covered above, add them into otherFindings as strings.

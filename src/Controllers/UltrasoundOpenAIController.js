@@ -3,6 +3,7 @@ export function createUltrasoundAnalysisOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         collectUploadedFiles,
         isPdfMime,
         isDocxMime,
@@ -12,8 +13,9 @@ export function createUltrasoundAnalysisOpenAIHandler(getContext) {
         extractUltrasoundFindingsFromPdfs
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -42,7 +44,7 @@ export function createUltrasoundAnalysisOpenAIHandler(getContext) {
         pdfFiles,
         imageFiles,
         extractedText,
-        provider: "openai"
+        provider
       });
 
       const f = findings && typeof findings === "object" ? findings : {};

@@ -3,6 +3,7 @@ export function createDocsTestsOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         collectUploadedFiles,
         isPdfMime,
         isDocxMime,
@@ -22,8 +23,9 @@ export function createDocsTestsOpenAIHandler(getContext) {
         heuristicExtractDocsTestsFromText
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -64,7 +66,7 @@ export function createDocsTestsOpenAIHandler(getContext) {
         };
         if (debugAi) {
           payload.debug = {
-            provider: "openai",
+            provider,
             extractedTextLength: 0,
             pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
             docxTextLength: typeof docxText === "string" ? docxText.length : 0,
@@ -90,7 +92,7 @@ export function createDocsTestsOpenAIHandler(getContext) {
           openai,
           imageFiles,
           extractedText: chunkText,
-          provider: "openai",
+          provider,
           debug: debugAi
         });
         lastRaw = typeof extraction?.raw === "string" ? extraction.raw : "";
@@ -101,7 +103,7 @@ export function createDocsTestsOpenAIHandler(getContext) {
           const extraction = await extractDocsTestsFromText({
             openai,
             extractedText: w,
-            provider: "openai",
+            provider,
             debug: debugAi
           });
           lastRaw = typeof extraction?.raw === "string" ? extraction.raw : lastRaw;
@@ -132,7 +134,7 @@ export function createDocsTestsOpenAIHandler(getContext) {
       };
       if (debugAi) {
         payload.debug = {
-          provider: "openai",
+          provider,
           extractedTextLength: typeof extractedText === "string" ? extractedText.length : 0,
           chunkTextLength: typeof chunkText === "string" ? chunkText.length : 0,
           pdfTextLength: typeof pdfText === "string" ? pdfText.length : 0,
@@ -158,6 +160,7 @@ export function createDocsTestsCleanOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         requireString,
         safeParseJsonObject,
         safeParseJsonArrayLoose,
@@ -165,8 +168,9 @@ export function createDocsTestsCleanOpenAIHandler(getContext) {
         cleanDocsTestsWithAi
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -184,7 +188,7 @@ export function createDocsTestsCleanOpenAIHandler(getContext) {
 
       const cleaned = await cleanDocsTestsWithAi({
         openai,
-        provider: "openai",
+        provider,
         tests: normalized,
         debug: debugAi
       });

@@ -3,6 +3,7 @@ export function createHeartUrineAnalysisOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         collectUploadedFiles,
         isPdfMime,
         isDocxMime,
@@ -23,8 +24,9 @@ export function createHeartUrineAnalysisOpenAIHandler(getContext) {
         OTHER_PARAMETER_TESTS
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -55,7 +57,7 @@ export function createHeartUrineAnalysisOpenAIHandler(getContext) {
         openai,
         pdfFiles,
         extractedText,
-        provider: "openai"
+        provider
       });
 
       const urinePromise = extractUrinogramTestsFromPdfs({
@@ -63,7 +65,7 @@ export function createHeartUrineAnalysisOpenAIHandler(getContext) {
         pdfFiles,
         imageFiles,
         extractedText,
-        provider: "openai"
+        provider
       });
 
       const chunks = chunkArray(PARAMETER_TESTS_FOR_EXTRACTION, 150);
@@ -73,7 +75,7 @@ export function createHeartUrineAnalysisOpenAIHandler(getContext) {
           pdfFiles,
           extractedText,
           testNames: chunk,
-          provider: "openai"
+          provider
         });
       });
 
@@ -105,14 +107,16 @@ export function createHeartAnalysisOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         collectUploadedFiles,
         isPdfMime,
         extractPdfTextForPrompt,
         extractHeartRelatedTestsFromPdfs
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -133,7 +137,7 @@ export function createHeartAnalysisOpenAIHandler(getContext) {
         openai,
         pdfFiles,
         extractedText,
-        provider: "openai"
+        provider
       });
 
       const heartTests = Array.isArray(incoming) ? incoming : [];
@@ -151,6 +155,7 @@ export function createUrineAnalysisOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         collectUploadedFiles,
         isPdfMime,
         isDocxMime,
@@ -161,8 +166,9 @@ export function createUrineAnalysisOpenAIHandler(getContext) {
         buildCompleteUrinogramTests
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -190,7 +196,7 @@ export function createUrineAnalysisOpenAIHandler(getContext) {
         pdfFiles,
         imageFiles,
         extractedText,
-        provider: "openai"
+        provider
       });
 
       const tests = buildCompleteUrinogramTests(incoming);

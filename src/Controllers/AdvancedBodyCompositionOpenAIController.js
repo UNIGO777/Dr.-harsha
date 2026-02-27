@@ -11,14 +11,20 @@ export function createAdvancedBodyCompositionOpenAIHandler(getContext) {
     try {
       const {
         getOpenAIClient,
+        getAiProviderFromReq,
         isPdfMime,
         safeParseJsonObject,
+        safeParseJsonObjectLoose,
         stripBrandingFromAdvancedBodyCompositionPayload,
-        getTextFromResponsesOutput
+        getTextFromResponsesOutput,
+        geminiGenerateContent,
+        getTextFromGeminiGenerateContentResponse,
+        getGeminiModel
       } = getContext();
 
-      const openai = getOpenAIClient();
-      if (!openai) {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
         return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
       }
 
@@ -32,6 +38,32 @@ export function createAdvancedBodyCompositionOpenAIHandler(getContext) {
       const requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : String(Date.now());
 
       const schemaHint = BODY_COMPOSITION_SCHEMA_HINT;
+
+      if (provider === "gemini") {
+        if (!extractedText) {
+          return res.status(400).json({ error: "Unable to extract PDF text for Gemini." });
+        }
+        const response = await geminiGenerateContent({
+          parts: [
+            {
+              text: `${BODY_COMPOSITION_SYSTEM_PROMPT}\n\n${schemaHint}\n\n[REQUEST_ID]\n${requestId}\n\n[PDF_TEXT]\n${extractedText}`
+            }
+          ],
+          model: getGeminiModel(),
+          temperature: 0,
+          maxOutputTokens: 4096
+        });
+        const content = getTextFromGeminiGenerateContentResponse(response);
+        const json = stripBrandingFromAdvancedBodyCompositionPayload(
+          safeParseJsonObjectLoose(content) ?? safeParseJsonObject(content)
+        );
+        res.json({
+          requestId,
+          data: json,
+          raw: json ? null : content
+        });
+        return;
+      }
 
       if (extractedText) {
         const completion = await openai.chat.completions.create({
