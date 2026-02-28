@@ -24,6 +24,7 @@ import {
   createUrineAnalysisHandler
 } from "../Controllers/HeartUrineController.js";
 import { createUltrasoundAnalysisHandler } from "../Controllers/UltrasoundController.js";
+import { createExerciseAssessmentHandler } from "../Controllers/ExerciseAssessmentController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -53,6 +54,10 @@ import { TESTS_FROM_PDFS_SYSTEM_PROMPT, buildTestsFromPdfsUserPrompt } from "../
 import { buildTestsFromImagesUserPrompt } from "../AiPrompts/testsFromImagesPrompts.js";
 import { URINOGRAM_ANCHOR_TERMS, buildUrinogramUserPrompt } from "../AiPrompts/urinePrompts.js";
 import { ULTRASOUND_ANCHOR_TERMS, buildUltrasoundUserPrompt } from "../AiPrompts/ultrasoundPrompts.js";
+import {
+  EXERCISE_ASSESSMENT_SYSTEM_PROMPT,
+  buildExerciseAssessmentUserPrompt
+} from "../AiPrompts/exerciseAssessmentPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -202,6 +207,282 @@ function parseMaybeNumber(value) {
   if (typeof value !== "string") return null;
   const n = Number(value);
   return Number.isFinite(n) ? n : null;
+}
+
+function parseOptionalNumberLoose(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return null;
+  const s = value.trim();
+  if (!s) return null;
+  const normalized = s.replace(/,/g, "");
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeExerciseAssessmentIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const patient = b.patient && typeof b.patient === "object" ? b.patient : {};
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : b;
+
+  const sex =
+    typeof patient.sex === "string"
+      ? patient.sex.trim().toLowerCase()
+      : typeof assessment.sex === "string"
+        ? assessment.sex.trim().toLowerCase()
+        : "";
+  const age = parseOptionalNumberLoose(patient.age ?? assessment.age);
+
+  const normalizedPatient = {
+    name: typeof patient.name === "string" ? patient.name.trim() : "",
+    sex: sex === "male" || sex === "female" ? sex : "",
+    age: Number.isFinite(age) && age > 0 ? Math.trunc(age) : null
+  };
+
+  const normalizedAssessment = {
+    exRestingHrBpm: parseOptionalNumberLoose(assessment.exRestingHrBpm),
+    exFunctionalTestType:
+      typeof assessment.exFunctionalTestType === "string" ? assessment.exFunctionalTestType.trim() : "",
+    exSixMinWalkDistanceM: parseOptionalNumberLoose(assessment.exSixMinWalkDistanceM),
+    exTwoMinStepTotalSteps: parseOptionalNumberLoose(assessment.exTwoMinStepTotalSteps),
+    exTalkTest: typeof assessment.exTalkTest === "string" ? assessment.exTalkTest.trim() : "",
+    exBorgScore: parseOptionalNumberLoose(assessment.exBorgScore),
+    exMaxHrRecordedBpm: parseOptionalNumberLoose(assessment.exMaxHrRecordedBpm),
+    exHrAtStopBpm: parseOptionalNumberLoose(assessment.exHrAtStopBpm),
+    exHrAt1MinBpm: parseOptionalNumberLoose(assessment.exHrAt1MinBpm),
+    exSitToStandTimeSec: parseOptionalNumberLoose(assessment.exSitToStandTimeSec),
+    exGripRightKg: parseOptionalNumberLoose(assessment.exGripRightKg),
+    exGripLeftKg: parseOptionalNumberLoose(assessment.exGripLeftKg)
+  };
+
+  if (normalizedAssessment.exFunctionalTestType !== "2min_step") normalizedAssessment.exFunctionalTestType = "6mwt";
+
+  const talk = normalizedAssessment.exTalkTest;
+  if (!["sing", "talk", "short", "cannot"].includes(talk)) normalizedAssessment.exTalkTest = "";
+
+  return { patient: normalizedPatient, assessment: normalizedAssessment };
+}
+
+function computeExerciseAssessment({ patient, assessment }) {
+  const sex = patient?.sex === "male" || patient?.sex === "female" ? patient.sex : "";
+  const age = Number.isFinite(patient?.age) ? patient.age : null;
+  const apmhr = Number.isFinite(age) && age > 0 ? 220 - age : null;
+
+  const rhr = Number.isFinite(assessment?.exRestingHrBpm) ? assessment.exRestingHrBpm : null;
+  const rhrCategory =
+    Number.isFinite(rhr) && rhr > 0
+      ? rhr < 60
+        ? "Excellent cardiovascular fitness"
+        : rhr < 70
+          ? "Good"
+          : rhr < 80
+            ? "Average"
+            : rhr < 90
+              ? "Reduced fitness"
+              : "High cardiometabolic risk"
+      : null;
+
+  const functionalTestType = assessment?.exFunctionalTestType === "2min_step" ? "2min_step" : "6mwt";
+  const sixMwt = Number.isFinite(assessment?.exSixMinWalkDistanceM) ? assessment.exSixMinWalkDistanceM : null;
+  const stepCount = Number.isFinite(assessment?.exTwoMinStepTotalSteps) ? assessment.exTwoMinStepTotalSteps : null;
+  const functionalCapacity =
+    functionalTestType === "6mwt" && Number.isFinite(sixMwt) && sixMwt > 0
+      ? sixMwt > 550
+        ? "Good"
+        : sixMwt >= 400
+          ? "Fair"
+          : sixMwt >= 300
+            ? "Low"
+            : "Poor"
+      : null;
+
+  const talk = assessment?.exTalkTest;
+  const talkIntensity =
+    talk === "sing" ? "Light" : talk === "talk" ? "Moderate" : talk === "short" ? "Vigorous" : talk === "cannot" ? "Stop" : null;
+
+  const borg = Number.isFinite(assessment?.exBorgScore) ? assessment.exBorgScore : null;
+  const borgIntensity =
+    Number.isFinite(borg) && borg >= 0
+      ? borg <= 1
+        ? "Light"
+        : borg <= 3
+          ? "Mild"
+          : borg <= 5
+            ? "Moderate"
+            : borg <= 7
+              ? "Vigorous"
+              : "Stop"
+      : null;
+
+  const maxHr = Number.isFinite(assessment?.exMaxHrRecordedBpm) ? assessment.exMaxHrRecordedBpm : null;
+  const hrmaxPercent =
+    Number.isFinite(maxHr) && maxHr > 0 && Number.isFinite(apmhr) && apmhr > 0 ? (maxHr / apmhr) * 100 : null;
+  const hrmaxCategory =
+    Number.isFinite(hrmaxPercent)
+      ? hrmaxPercent < 50
+        ? "Sedentary / very light"
+        : hrmaxPercent <= 63
+          ? "Mild"
+          : hrmaxPercent <= 76
+            ? "Moderate"
+            : hrmaxPercent <= 93
+              ? "Vigorous"
+              : "Very vigorous (avoid in common people)"
+      : null;
+
+  const hrStop = Number.isFinite(assessment?.exHrAtStopBpm) ? assessment.exHrAtStopBpm : null;
+  const hr1 = Number.isFinite(assessment?.exHrAt1MinBpm) ? assessment.exHrAt1MinBpm : null;
+  const hrRecovery = Number.isFinite(hrStop) && Number.isFinite(hr1) ? hrStop - hr1 : null;
+  const hrRecoveryCategory =
+    Number.isFinite(hrRecovery)
+      ? hrRecovery >= 20
+        ? "Excellent"
+        : hrRecovery >= 12
+          ? "Normal"
+          : "Poor autonomic fitness (high risk)"
+      : null;
+
+  const sts = Number.isFinite(assessment?.exSitToStandTimeSec) ? assessment.exSitToStandTimeSec : null;
+  const stsCategory =
+    Number.isFinite(sts) && sts > 0 ? (sts < 10 ? "Good" : sts <= 15 ? "Average" : "Weak / sarcopenia risk") : null;
+
+  const gripR = Number.isFinite(assessment?.exGripRightKg) ? assessment.exGripRightKg : null;
+  const gripL = Number.isFinite(assessment?.exGripLeftKg) ? assessment.exGripLeftKg : null;
+  const gripMin = [gripR, gripL].filter((n) => Number.isFinite(n)).reduce((min, n) => (n < min ? n : min), Infinity);
+  const gripWeakness =
+    (sex === "male" && Number.isFinite(gripMin) && gripMin < 26) || (sex === "female" && Number.isFinite(gripMin) && gripMin < 16)
+      ? true
+      : false;
+
+  const safetyFlags = [];
+  if (talk === "cannot") safetyFlags.push("Cannot talk during activity (stop exercise)");
+  if (Number.isFinite(borg) && borg >= 8) safetyFlags.push("Very severe breathlessness (Borg ≥ 8)");
+  if (Number.isFinite(hrRecovery) && hrRecovery < 12) safetyFlags.push("Poor heart-rate recovery (<12 bpm)");
+  if (Number.isFinite(hrmaxPercent) && hrmaxPercent > 93) safetyFlags.push("Very vigorous intensity (>93% HRmax)");
+  if (Number.isFinite(rhr) && rhr >= 90) safetyFlags.push("High resting heart rate (≥90 bpm)");
+
+  const toOrdinal = (label) => {
+    if (!label) return null;
+    if (label === "Stop") return "stop";
+    const v = String(label).toLowerCase();
+    if (v.includes("sedentary")) return 0;
+    if (v === "light") return 0;
+    if (v === "mild") return 1;
+    if (v === "moderate") return 2;
+    if (v === "vigorous") return 3;
+    if (v.includes("very vigorous")) return 3;
+    return null;
+  };
+
+  const ordinals = [toOrdinal(talkIntensity), toOrdinal(borgIntensity), toOrdinal(hrmaxCategory)].filter((v) => v !== null);
+  const hasStop = ordinals.includes("stop");
+  const numericOrdinals = ordinals.filter((v) => typeof v === "number").sort((a, b) => a - b);
+  const finalOrdinal =
+    hasStop ? null : numericOrdinals.length === 0 ? null : numericOrdinals[Math.floor((numericOrdinals.length - 1) / 2)];
+  const finalCategory =
+    hasStop
+      ? "Stop"
+      : finalOrdinal === 0
+        ? "Sedentary"
+        : finalOrdinal === 1
+          ? "Mild"
+          : finalOrdinal === 2
+            ? "Moderate"
+            : finalOrdinal === 3
+              ? "Vigorous"
+              : null;
+
+  let score = 100;
+  if (Number.isFinite(rhr)) {
+    if (rhr >= 90) score -= 20;
+    else if (rhr >= 80) score -= 10;
+    else if (rhr >= 70) score -= 5;
+  }
+  if (Number.isFinite(sixMwt) && functionalTestType === "6mwt") {
+    if (sixMwt < 300) score -= 25;
+    else if (sixMwt < 400) score -= 15;
+    else if (sixMwt < 550) score -= 5;
+  }
+  if (Number.isFinite(hrRecovery)) {
+    if (hrRecovery < 12) score -= 20;
+    else if (hrRecovery < 20) score -= 10;
+  }
+  if (Number.isFinite(sts)) {
+    if (sts > 15) score -= 15;
+    else if (sts >= 10) score -= 5;
+  }
+  if (gripWeakness) score -= 10;
+  if (talk === "cannot" || (Number.isFinite(borg) && borg >= 8)) score -= 30;
+  if (Number.isFinite(hrmaxPercent) && hrmaxPercent > 93) score -= 10;
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  let grade = score >= 85 ? "A" : score >= 70 ? "B" : score >= 50 ? "C" : "D";
+  if (hasStop || (Number.isFinite(hrRecovery) && hrRecovery < 12)) grade = "D";
+
+  return {
+    agePredictedMaxHrBpm: apmhr,
+    restingHrCategory: rhrCategory,
+    functionalTestType,
+    functionalCapacity,
+    talkIntensity,
+    borgIntensity,
+    hrmaxPercent: Number.isFinite(hrmaxPercent) ? Math.round(hrmaxPercent * 10) / 10 : null,
+    hrmaxCategory,
+    hrRecovery,
+    hrRecoveryCategory,
+    sitToStandCategory: stsCategory,
+    gripWeakness,
+    finalCategory,
+    score,
+    grade,
+    safetyFlags
+  };
+}
+
+async function generateExerciseAssessmentSummaryWithAi({ openai, provider, patient, assessment, computed, debug }) {
+  const userPrompt = buildExerciseAssessmentUserPrompt({ patient, assessment, computed });
+  const systemPrompt = EXERCISE_ASSESSMENT_SYSTEM_PROMPT;
+
+  let raw = "";
+  if (provider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      temperature: 0
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else if (provider === "gemini") {
+    const response = await geminiGenerateContent({
+      model: getGeminiModel(),
+      temperature: 0,
+      parts: [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }]
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      text: { format: { type: "json_object" } },
+      input: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: [{ type: "input_text", text: userPrompt }] }
+      ]
+    });
+    raw = getTextFromResponsesOutput(response);
+  }
+
+  const parsed =
+    safeParseJsonObject(raw) ??
+    safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ??
+    null;
+
+  const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
+  const counselling = typeof parsed?.counselling === "string" ? parsed.counselling : "";
+  const safetyFlags = Array.isArray(parsed?.safetyFlags) ? parsed.safetyFlags.filter((s) => typeof s === "string" && s.trim()) : [];
+
+  const payload = { summary, counselling, safetyFlags };
+  if (debug) payload.raw = raw;
+  return payload;
 }
 
 function getTextFromMessageContent(content) {
@@ -3519,6 +3800,8 @@ gptRouter.post(
   createUltrasoundAnalysisHandler(getGptControllerContext)
 );
 
+gptRouter.post("/exercise-assessment", upload.none(), createExerciseAssessmentHandler(getGptControllerContext));
+
 gptRouter.post(
   "/docs-tests",
   upload.fields([
@@ -3585,6 +3868,9 @@ function getGptControllerContext() {
     geminiGenerateContent,
     parseMaybeJson,
     parseMaybeNumber,
+    normalizeExerciseAssessmentIncoming,
+    computeExerciseAssessment,
+    generateExerciseAssessmentSummaryWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
