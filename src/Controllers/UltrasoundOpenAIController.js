@@ -39,18 +39,29 @@ export function createUltrasoundAnalysisOpenAIHandler(getContext) {
       const docxText = await extractDocxTextForPrompt(docxFiles);
       const extractedText = `${pdfText}${docxText}`;
 
+      const patientSexHint = req?.body?.patientSex ?? req?.body?.sex ?? "";
       const findings = await extractUltrasoundFindingsFromPdfs({
         openai,
         pdfFiles,
         imageFiles,
         extractedText,
-        provider
+        provider,
+        patientSexHint
       });
 
       const f = findings && typeof findings === "object" ? findings : {};
       const hasAny =
-        Object.values(f).some((v) => v && typeof v === "object" && v.status && v.status !== "Not included in the PDF") ||
-        (Array.isArray(f.otherFindings) && f.otherFindings.length > 0);
+        Object.entries(f).some(([k, v]) => {
+          if (k === "otherFindings") return false;
+          if (k === "patientSex" || k === "reportDate") return false;
+          if (k === "postVoidResidualUrineVolumeMl") {
+            const obj = v && typeof v === "object" && !Array.isArray(v) ? v : null;
+            const d = typeof obj?.details === "string" ? obj.details.trim() : "";
+            const ml = typeof obj?.valueMl === "string" ? obj.valueMl.trim() : "";
+            return Boolean(d || ml);
+          }
+          return typeof v === "string" && v.trim().length > 0;
+        }) || (Array.isArray(f.otherFindings) && f.otherFindings.length > 0);
 
       res.json({ ultrasound: { data: hasAny, findings: f } });
     } catch (err) {

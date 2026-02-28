@@ -3173,38 +3173,66 @@ async function extractUrinogramTestsFromPdfs({ openai, pdfFiles, imageFiles, ext
   return normalizeUrinogramIncomingTests(parsedJson);
 }
 
-function normalizeUltrasoundStatus(value) {
+function normalizeUltrasoundPatientSex(value) {
   const s = typeof value === "string" ? value.trim().toLowerCase() : "";
-  if (!s) return "Not included in the PDF";
-  if (s === "n") return "Normal";
-  if (s === "normal") return "Normal";
-  if (s === "y" || s === "yes") return "Normal";
-  if (s === "abnormal") return "Abnormal";
-  if (s === "a") return "Abnormal";
-  if (s.includes("fatty")) return "Abnormal";
-  if (s.includes("not included") || s.includes("not found") || s.includes("not present")) {
-    return "Not included in the PDF";
-  }
-  if (s.includes("absent") || s.includes("nil")) return "Normal";
-  if (s.includes("present")) return "Abnormal";
-  return "Not included in the PDF";
+  if (!s) return "Unknown";
+  if (s === "m" || s === "male" || s.includes("male")) return "Male";
+  if (s === "f" || s === "female" || s.includes("female")) return "Female";
+  return "Unknown";
 }
 
-function normalizeUltrasoundItem(value) {
-  const obj = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const status = normalizeUltrasoundStatus(obj?.status ?? obj?.value ?? obj?.result);
-  const details = toNullOrString(obj?.details ?? obj?.remark ?? obj?.remarks ?? obj?.note ?? obj?.notes) ?? "";
-  return { status, details };
+function extractUltrasoundPatientSexFromText(text) {
+  const s = typeof text === "string" ? text : "";
+  if (!s) return "Unknown";
+  const lower = s.toLowerCase();
+
+  const sexLine = lower.match(/\b(sex|gender)\s*[:\-]?\s*(male|female|m|f)\b/);
+  if (sexLine?.[2]) return normalizeUltrasoundPatientSex(sexLine[2]);
+
+  if (/\b(male)\b/.test(lower) && !/\bfemale\b/.test(lower)) return "Male";
+  if (/\b(female)\b/.test(lower) && !/\bmale\b/.test(lower)) return "Female";
+
+  if (/\bmr\.?\b/.test(lower) && !/\bmrs\.?\b/.test(lower) && !/\bms\.?\b/.test(lower)) return "Male";
+  if (/\bmrs\.?\b/.test(lower) || /\bms\.?\b/.test(lower)) return "Female";
+
+  return "Unknown";
+}
+
+function normalizeUltrasoundDetails(value) {
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s;
+  }
+  const obj = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  if (!obj) return "";
+
+  const details =
+    toNullOrString(obj?.details ?? obj?.remark ?? obj?.remarks ?? obj?.note ?? obj?.notes ?? obj?.text) ?? "";
+  if (details.trim()) return details.trim();
+
+  const statusRaw = toNullOrString(obj?.status ?? obj?.value ?? obj?.result) ?? "";
+  const status = statusRaw.trim().toLowerCase();
+  if (status === "normal" || status === "abnormal") return statusRaw.trim();
+  if (status === "n") return "Normal";
+  if (status === "a") return "Abnormal";
+
+  return "";
 }
 
 function normalizeUltrasoundPvr(value) {
-  const obj = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const status = normalizeUltrasoundStatus(obj?.status ?? obj?.value ?? obj?.result);
-  const details = toNullOrString(obj?.details ?? obj?.remark ?? obj?.remarks ?? obj?.note ?? obj?.notes) ?? "";
-  const rawMl = toNullOrString(obj?.valueMl ?? obj?.value_ml ?? obj?.value ?? obj?.ml ?? obj?.volumeMl ?? obj?.volume_ml) ?? "";
+  const obj = value && typeof value === "object" && !Array.isArray(value) ? value : null;
+  if (!obj) {
+    const s = typeof value === "string" ? value.trim() : "";
+    const match = s.match(/(\d+(?:\.\d+)?)/);
+    return { valueMl: match?.[1] ?? "", details: s };
+  }
+  const details =
+    toNullOrString(obj?.details ?? obj?.remark ?? obj?.remarks ?? obj?.note ?? obj?.notes ?? obj?.text) ?? "";
+  const rawMl =
+    toNullOrString(obj?.valueMl ?? obj?.value_ml ?? obj?.value ?? obj?.ml ?? obj?.volumeMl ?? obj?.volume_ml) ?? "";
   const mlMatch = String(rawMl).trim().match(/(\d+(?:\.\d+)?)/);
   const valueMl = mlMatch?.[1] ?? "";
-  return { status, valueMl, details };
+  return { valueMl, details: details.trim() };
 }
 
 function normalizeUltrasoundOtherFindings(value) {
@@ -3277,9 +3305,16 @@ function extractUltrasoundReportDateFromText(text) {
   return "";
 }
 
-function normalizeUltrasoundFindings(parsedJson, fallbackText) {
+function normalizeUltrasoundFindings(parsedJson, { fallbackText, patientSexHint } = {}) {
   const root = parsedJson && typeof parsedJson === "object" ? parsedJson : {};
   const u = root?.ultrasound && typeof root.ultrasound === "object" ? root.ultrasound : root;
+
+  const sexFromReport = normalizeUltrasoundPatientSex(
+    u?.patientSex ?? u?.patient_sex ?? u?.sex ?? u?.gender ?? root?.patientSex ?? root?.sex
+  );
+  const sexFromHint = normalizeUltrasoundPatientSex(patientSexHint);
+  const sexFromText = extractUltrasoundPatientSexFromText(fallbackText);
+  const patientSex = sexFromReport !== "Unknown" ? sexFromReport : sexFromHint !== "Unknown" ? sexFromHint : sexFromText;
 
   const reportDate =
     normalizeUltrasoundReportDateString(
@@ -3289,41 +3324,23 @@ function normalizeUltrasoundFindings(parsedJson, fallbackText) {
   const reportDetails =
     toNullOrString(u?.reportDetails ?? u?.report_details ?? u?.summary ?? u?.details ?? u?.impression) ?? "";
 
-  const liver = normalizeUltrasoundItem(u?.liver);
-  const spleen = normalizeUltrasoundItem(u?.spleen);
-  const rightKidney = normalizeUltrasoundItem(u?.rightKidney ?? u?.right_kidney ?? u?.rk);
-  const leftKidney = normalizeUltrasoundItem(u?.leftKidney ?? u?.left_kidney ?? u?.lk);
-  const gallBladder = normalizeUltrasoundItem(u?.gallBladder ?? u?.gall_bladder ?? u?.gb);
-  const urinaryBladder = normalizeUltrasoundItem(u?.urinaryBladder ?? u?.urinary_bladder ?? u?.ub);
+  const liver = normalizeUltrasoundDetails(u?.liver);
+  const spleen = normalizeUltrasoundDetails(u?.spleen);
+  const rightKidney = normalizeUltrasoundDetails(u?.rightKidney ?? u?.right_kidney ?? u?.rk);
+  const leftKidney = normalizeUltrasoundDetails(u?.leftKidney ?? u?.left_kidney ?? u?.lk);
+  const gallBladder = normalizeUltrasoundDetails(u?.gallBladder ?? u?.gall_bladder ?? u?.gb);
+  const urinaryBladder = normalizeUltrasoundDetails(u?.urinaryBladder ?? u?.urinary_bladder ?? u?.ub);
   const postVoidResidualUrineVolumeMl = normalizeUltrasoundPvr(
     u?.postVoidResidualUrineVolumeMl ?? u?.post_void_residual_urine_volume_ml ?? u?.post_void_residual ?? u?.pvr
   );
-  const uterus = normalizeUltrasoundItem(u?.uterus);
-  const ovaries = normalizeUltrasoundItem(u?.ovaries ?? u?.ovary);
-  const prostate = normalizeUltrasoundItem(u?.prostate);
+  const uterus = normalizeUltrasoundDetails(u?.uterus);
+  const ovaries = normalizeUltrasoundDetails(u?.ovaries ?? u?.ovary);
+  const prostate = normalizeUltrasoundDetails(u?.prostate);
   const otherFindings = normalizeUltrasoundOtherFindings(u?.otherFindings ?? u?.other_findings ?? u?.other);
 
-  const statuses = [
-    liver.status,
-    spleen.status,
-    rightKidney.status,
-    leftKidney.status,
-    gallBladder.status,
-    urinaryBladder.status,
-    postVoidResidualUrineVolumeMl.status,
-    uterus.status,
-    ovaries.status,
-    prostate.status
-  ];
-  const overallStatus = statuses.includes("Abnormal")
-    ? "Abnormal"
-    : statuses.includes("Normal")
-      ? "Normal"
-      : "Not included in the PDF";
-
-  return {
+  const base = {
+    patientSex,
     reportDate,
-    overallStatus,
     reportDetails,
     liver,
     spleen,
@@ -3332,11 +3349,12 @@ function normalizeUltrasoundFindings(parsedJson, fallbackText) {
     gallBladder,
     urinaryBladder,
     postVoidResidualUrineVolumeMl,
-    uterus,
-    ovaries,
-    prostate,
     otherFindings
   };
+
+  if (patientSex === "Male") return { ...base, prostate };
+  if (patientSex === "Female") return { ...base, uterus, ovaries };
+  return { ...base, uterus, ovaries, prostate };
 }
 
 async function extractUltrasoundFindingsFromPdfs({
@@ -3344,10 +3362,11 @@ async function extractUltrasoundFindingsFromPdfs({
   pdfFiles,
   imageFiles,
   extractedText,
-  provider
+  provider,
+  patientSexHint
 }) {
   const systemPrompt = MEDICAL_REPORT_EXTRACTION_SYSTEM_PROMPT;
-  const userPrompt = buildUltrasoundUserPrompt();
+  const userPrompt = buildUltrasoundUserPrompt({ patientSexHint });
 
   const resolvedProvider = normalizeAiProvider(provider);
   const pdfList = Array.isArray(pdfFiles) ? pdfFiles : [];
@@ -3377,7 +3396,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     const content = getTextFromGeminiGenerateContentResponse(response);
     const parsedJson = safeParseJsonObjectLoose(content) ?? safeParseJsonObject(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson, textForPrompt);
+    return normalizeUltrasoundFindings(parsedJson, { fallbackText: textForPrompt, patientSexHint });
   }
 
   if (resolvedProvider === "claude") {
@@ -3403,7 +3422,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     const content = getTextFromAnthropicMessageResponse(response);
     const parsedJson = safeParseJsonObjectLoose(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson, textForPrompt);
+    return normalizeUltrasoundFindings(parsedJson, { fallbackText: textForPrompt, patientSexHint });
   }
 
   let content = "";
@@ -3422,7 +3441,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     content = completion.choices?.[0]?.message?.content ?? "";
     const parsedJson = safeParseJsonObject(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson, extractedText);
+    return normalizeUltrasoundFindings(parsedJson, { fallbackText: extractedText, patientSexHint });
   }
 
   if (imageList.length > 0 && pdfList.length === 0) {
@@ -3448,7 +3467,7 @@ async function extractUltrasoundFindingsFromPdfs({
     });
     content = completion.choices?.[0]?.message?.content ?? "";
     const parsedJson = safeParseJsonObject(content) ?? {};
-    return normalizeUltrasoundFindings(parsedJson, extractedText);
+    return normalizeUltrasoundFindings(parsedJson, { fallbackText: extractedText, patientSexHint });
   }
 
   const fileParts = pdfList.map((f) => {
@@ -3473,7 +3492,7 @@ async function extractUltrasoundFindingsFromPdfs({
   });
   content = getTextFromResponsesOutput(response);
   const parsedJson = safeParseJsonObject(content) ?? {};
-  return normalizeUltrasoundFindings(parsedJson, extractedText);
+  return normalizeUltrasoundFindings(parsedJson, { fallbackText: extractedText, patientSexHint });
 }
 
 gptRouter.post(

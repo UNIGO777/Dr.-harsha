@@ -4,6 +4,10 @@ export const ULTRASOUND_ANCHOR_TERMS = [
   "ABDOMEN",
   "WHOLE ABDOMEN",
   "DATE",
+  "SEX",
+  "GENDER",
+  "MALE",
+  "FEMALE",
   "LIVER",
   "SPLEEN",
   "KIDNEY",
@@ -18,43 +22,45 @@ export const ULTRASOUND_ANCHOR_TERMS = [
   "FATTY LIVER"
 ];
 
-export function buildUltrasoundUserPrompt() {
-  return `Extract ultrasound findings from the medical report.
+export function buildUltrasoundUserPrompt({ patientSexHint } = {}) {
+  const sexHint = typeof patientSexHint === "string" ? patientSexHint.trim() : "";
+  const sexLine = sexHint ? `\n\nPatient sex from basic details: ${sexHint}` : "";
+  return `Extract ultrasound findings from the medical report.${sexLine}
 
 Return ONLY valid JSON.
 Do not return markdown.
 Do not add extra keys.
-If a field is not present in the report, set its status to "Not included in the PDF" and keep details empty.
+If a field is not present in the report, use an empty string "".
 
 Strict JSON format:
 {
   "ultrasound": {
+    "patientSex": "Male|Female|Unknown",
     "reportDate": "",
     "reportDetails": "",
-    "liver": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "spleen": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "rightKidney": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "leftKidney": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "gallBladder": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "urinaryBladder": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
+    "liver": "",
+    "spleen": "",
+    "rightKidney": "",
+    "leftKidney": "",
+    "gallBladder": "",
+    "urinaryBladder": "",
     "postVoidResidualUrineVolumeMl": {
-      "status": "Normal|Abnormal|Not included in the PDF",
       "valueMl": "",
       "details": ""
     },
-    "uterus": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "ovaries": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
-    "prostate": { "status": "Normal|Abnormal|Not included in the PDF", "details": "" },
     "otherFindings": []
   }
 }
 
 Rules:
+- patientSex should be "Male" or "Female" if stated in the report. If not stated, use Patient sex from basic details. If still unclear, "Unknown".
+- If patientSex is "Male": include "prostate" in the ultrasound object; do NOT include "uterus" and "ovaries".
+- If patientSex is "Female": include "uterus" and "ovaries" in the ultrasound object; do NOT include "prostate".
+- If patientSex is "Unknown": include "uterus", "ovaries", and "prostate".
 - reportDate should be the study/report date if present. Prefer "YYYY-MM-DD". If unclear, leave it as "".
-- reportDetails should be a short patient-friendly summary of the ultrasound report (2-6 lines). If everything is normal, say it clearly.
-- Status must be exactly one of: "Normal", "Abnormal", "Not included in the PDF"
-- Put important abnormal findings in details (example: "fatty liver", "grade 2 fatty liver", "umbilical hernia", etc.)
+- reportDetails should be a short patient-friendly summary of the ultrasound report (2-6 lines).
+- Keep organ fields as short extracted findings text (example: "fatty liver", "grade 2 fatty liver", "normal", "no focal lesion", etc.)
 - If the report contains other ultrasound findings not covered above, add them into otherFindings as strings.
 - valueMl should contain only the numeric value if present (example: "12" or "12.5"). If not present, leave it as "".
-- Preserve wording from the report as much as possible in details.`;
+- Preserve wording from the report as much as possible.`;
 }
