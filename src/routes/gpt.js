@@ -25,6 +25,7 @@ import {
 } from "../Controllers/HeartUrineController.js";
 import { createUltrasoundAnalysisHandler } from "../Controllers/UltrasoundController.js";
 import { createExerciseAssessmentHandler } from "../Controllers/ExerciseAssessmentController.js";
+import { createDietAssessmentHandler } from "../Controllers/DietAssessmentController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -58,6 +59,7 @@ import {
   EXERCISE_ASSESSMENT_SYSTEM_PROMPT,
   buildExerciseAssessmentUserPrompt
 } from "../AiPrompts/exerciseAssessmentPrompts.js";
+import { DIET_ASSESSMENT_SYSTEM_PROMPT, buildDietAssessmentUserPrompt } from "../AiPrompts/dietAssessmentPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -481,6 +483,209 @@ async function generateExerciseAssessmentSummaryWithAi({ openai, provider, patie
   const safetyFlags = Array.isArray(parsed?.safetyFlags) ? parsed.safetyFlags.filter((s) => typeof s === "string" && s.trim()) : [];
 
   const payload = { summary, counselling, safetyFlags };
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+function parseOptionalIntegerLoose(value) {
+  const n = parseOptionalNumberLoose(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+function normalizeDietAssessmentIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const patient = b.patient && typeof b.patient === "object" ? b.patient : {};
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : b;
+
+  const sex =
+    typeof patient.sex === "string"
+      ? patient.sex.trim().toLowerCase()
+      : typeof assessment.sex === "string"
+        ? assessment.sex.trim().toLowerCase()
+        : "";
+  const age = parseOptionalIntegerLoose(patient.age ?? assessment.age);
+
+  const normPatient = {
+    name: typeof patient.name === "string" ? patient.name.trim() : "",
+    sex: sex === "male" || sex === "female" ? sex : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+
+  const yesNo = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    return s === "yes" || s === "no" ? s : "";
+  };
+  const freq = (v) => {
+    const s = typeof v === "string" ? v.trim() : "";
+    return ["lt3", "3to5", "7"].includes(s) ? s : "";
+  };
+
+  const listStringArray = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" && x.trim()).map((x) => x.trim()) : []);
+
+  const normAssessment = {
+    dietBreakfastTime: typeof assessment.dietBreakfastTime === "string" ? assessment.dietBreakfastTime.trim() : "",
+    dietLunchTime: typeof assessment.dietLunchTime === "string" ? assessment.dietLunchTime.trim() : "",
+    dietDinnerTime: typeof assessment.dietDinnerTime === "string" ? assessment.dietDinnerTime.trim() : "",
+    dietBedtime: typeof assessment.dietBedtime === "string" ? assessment.dietBedtime.trim() : "",
+    dietBreakfastRice: freq(assessment.dietBreakfastRice),
+    dietBreakfastWheat: freq(assessment.dietBreakfastWheat),
+    dietBreakfastMillets: freq(assessment.dietBreakfastMillets),
+    dietBreakfastProtein: freq(assessment.dietBreakfastProtein),
+    dietBreakfastFruit: freq(assessment.dietBreakfastFruit),
+    dietBreakfastLeafyVeg: freq(assessment.dietBreakfastLeafyVeg),
+    dietBreakfastNonLeafyVeg: freq(assessment.dietBreakfastNonLeafyVeg),
+    dietBreakfastTeaCoffeeMilk: freq(assessment.dietBreakfastTeaCoffeeMilk),
+    dietBreakfastDryNuts: freq(assessment.dietBreakfastDryNuts),
+    dietBreakfastDrySeeds: freq(assessment.dietBreakfastDrySeeds),
+    dietLunchRice: freq(assessment.dietLunchRice),
+    dietLunchWheat: freq(assessment.dietLunchWheat),
+    dietLunchMillets: freq(assessment.dietLunchMillets),
+    dietLunchProtein: freq(assessment.dietLunchProtein),
+    dietLunchFruit: freq(assessment.dietLunchFruit),
+    dietLunchLeafyVeg: freq(assessment.dietLunchLeafyVeg),
+    dietLunchNonLeafyVeg: freq(assessment.dietLunchNonLeafyVeg),
+    dietLunchCurdButtermilk: freq(assessment.dietLunchCurdButtermilk),
+    dietDinnerSimilarToLunch: yesNo(assessment.dietDinnerSimilarToLunch),
+    dietDinnerHighRiceRagi: yesNo(assessment.dietDinnerHighRiceRagi),
+    dietDinnerSkipFrequently: yesNo(assessment.dietDinnerSkipFrequently),
+    dietRule5WholeGrainsDaily: yesNo(assessment.dietRule5WholeGrainsDaily),
+    dietRule5ProteinDaily: yesNo(assessment.dietRule5ProteinDaily),
+    dietRule5VegetablesDaily: yesNo(assessment.dietRule5VegetablesDaily),
+    dietRule5FruitsDaily: yesNo(assessment.dietRule5FruitsDaily),
+    dietRule5NutsSeedsDaily: yesNo(assessment.dietRule5NutsSeedsDaily),
+    dietVarietyPulsesProtein: parseOptionalIntegerLoose(assessment.dietVarietyPulsesProtein),
+    dietVarietyVegetables: parseOptionalIntegerLoose(assessment.dietVarietyVegetables),
+    dietVarietyFruits: parseOptionalIntegerLoose(assessment.dietVarietyFruits),
+    dietVarietyWholeGrains: parseOptionalIntegerLoose(assessment.dietVarietyWholeGrains),
+    dietVarietyDryNuts: parseOptionalIntegerLoose(assessment.dietVarietyDryNuts),
+    dietVarietyDrySeeds: parseOptionalIntegerLoose(assessment.dietVarietyDrySeeds),
+    dietProbioticIntake:
+      typeof assessment.dietProbioticIntake === "string" && ["ge5", "lt5", "rare"].includes(assessment.dietProbioticIntake.trim())
+        ? assessment.dietProbioticIntake.trim()
+        : "",
+    dietNegativeHabits: listStringArray(assessment.dietNegativeHabits),
+    dietOutsideFoodFrequency:
+      typeof assessment.dietOutsideFoodFrequency === "string" && ["gt2wk", "once_week", "once_month"].includes(assessment.dietOutsideFoodFrequency.trim())
+        ? assessment.dietOutsideFoodFrequency.trim()
+        : "",
+    dietSnacksTiming: typeof assessment.dietSnacksTiming === "string" ? assessment.dietSnacksTiming.trim() : "",
+    dietSnacksItems: listStringArray(assessment.dietSnacksItems),
+    dietBeveragesTeaCoffeeJuiceCupsPerDay: parseOptionalNumberLoose(assessment.dietBeveragesTeaCoffeeJuiceCupsPerDay),
+    dietBeveragesWithSugar: yesNo(assessment.dietBeveragesWithSugar),
+    dietBeveragesWithMilk: yesNo(assessment.dietBeveragesWithMilk),
+    dietBeveragesPackagedDrinksJuices: yesNo(assessment.dietBeveragesPackagedDrinksJuices),
+    dietPatternFlags: listStringArray(assessment.dietPatternFlags)
+  };
+
+  return { patient: normPatient, assessment: normAssessment };
+}
+
+function computeDietAssessment({ assessment }) {
+  const a = assessment && typeof assessment === "object" ? assessment : {};
+  const rule5 = [
+    a.dietRule5WholeGrainsDaily,
+    a.dietRule5ProteinDaily,
+    a.dietRule5VegetablesDaily,
+    a.dietRule5FruitsDaily,
+    a.dietRule5NutsSeedsDaily
+  ];
+  const rule5Score = rule5.filter((v) => v === "yes").length;
+
+  const varietyTargets = {
+    dietVarietyPulsesProtein: 5,
+    dietVarietyVegetables: 7,
+    dietVarietyFruits: 7,
+    dietVarietyWholeGrains: 3,
+    dietVarietyDryNuts: 3,
+    dietVarietyDrySeeds: 3
+  };
+
+  const variety = Object.entries(varietyTargets).map(([k, target]) => {
+    const v = a[k];
+    const n = Number.isFinite(v) ? v : null;
+    return { key: k, value: n, target, met: Number.isFinite(n) ? n >= target : false };
+  });
+  const varietyScore = variety.filter((x) => x.met).length;
+
+  const probioticScore = a.dietProbioticIntake === "ge5" ? 1 : 0;
+
+  const positiveScore = rule5Score + varietyScore + probioticScore;
+
+  const negativeHabitsCount = Array.isArray(a.dietNegativeHabits) ? a.dietNegativeHabits.length : 0;
+  const negativeScore = negativeHabitsCount;
+
+  const netScore = positiveScore - negativeScore;
+
+  const category =
+    netScore > 10
+      ? "Very healthy eating"
+      : netScore >= 5
+        ? "Healthy eating"
+        : netScore >= 2
+          ? "Mildly unhealthy"
+          : netScore >= 0
+            ? "Moderately unhealthy"
+            : "Very unhealthy";
+
+  return {
+    positiveScore,
+    negativeScore,
+    netScore,
+    category,
+    rule5Score,
+    varietyScore,
+    probioticScore,
+    varietyBreakdown: variety
+  };
+}
+
+async function generateDietAssessmentSummaryWithAi({ openai, provider, patient, assessment, computed, debug }) {
+  const userPrompt = buildDietAssessmentUserPrompt({ patient, assessment, computed });
+  const systemPrompt = DIET_ASSESSMENT_SYSTEM_PROMPT;
+
+  let raw = "";
+  if (provider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      temperature: 0
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else if (provider === "gemini") {
+    const response = await geminiGenerateContent({
+      model: getGeminiModel(),
+      temperature: 0,
+      parts: [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }]
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      text: { format: { type: "json_object" } },
+      input: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: [{ type: "input_text", text: userPrompt }] }
+      ]
+    });
+    raw = getTextFromResponsesOutput(response);
+  }
+
+  const parsed =
+    safeParseJsonObject(raw) ??
+    safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ??
+    null;
+
+  const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
+  const counselling = typeof parsed?.counselling === "string" ? parsed.counselling : "";
+  const keyIssues = Array.isArray(parsed?.keyIssues) ? parsed.keyIssues.filter((s) => typeof s === "string" && s.trim()) : [];
+  const suggestedActions = Array.isArray(parsed?.suggestedActions)
+    ? parsed.suggestedActions.filter((s) => typeof s === "string" && s.trim())
+    : [];
+
+  const payload = { summary, counselling, keyIssues, suggestedActions };
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -3802,6 +4007,8 @@ gptRouter.post(
 
 gptRouter.post("/exercise-assessment", upload.none(), createExerciseAssessmentHandler(getGptControllerContext));
 
+gptRouter.post("/diet-assessment", upload.none(), createDietAssessmentHandler(getGptControllerContext));
+
 gptRouter.post(
   "/docs-tests",
   upload.fields([
@@ -3871,6 +4078,9 @@ function getGptControllerContext() {
     normalizeExerciseAssessmentIncoming,
     computeExerciseAssessment,
     generateExerciseAssessmentSummaryWithAi,
+    normalizeDietAssessmentIncoming,
+    computeDietAssessment,
+    generateDietAssessmentSummaryWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
