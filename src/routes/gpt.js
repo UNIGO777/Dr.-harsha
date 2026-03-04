@@ -26,6 +26,7 @@ import {
 import { createUltrasoundAnalysisHandler } from "../Controllers/UltrasoundController.js";
 import { createExerciseAssessmentHandler } from "../Controllers/ExerciseAssessmentController.js";
 import { createDietAssessmentHandler } from "../Controllers/DietAssessmentController.js";
+import { createAnsAssessmentHandler } from "../Controllers/AnsAssessmentController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -60,6 +61,7 @@ import {
   buildExerciseAssessmentUserPrompt
 } from "../AiPrompts/exerciseAssessmentPrompts.js";
 import { DIET_ASSESSMENT_SYSTEM_PROMPT, buildDietAssessmentUserPrompt } from "../AiPrompts/dietAssessmentPrompts.js";
+import { ANS_ASSESSMENT_SYSTEM_PROMPT, buildAnsAssessmentUserPrompt } from "../AiPrompts/ansAssessmentPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -686,6 +688,146 @@ async function generateDietAssessmentSummaryWithAi({ openai, provider, patient, 
     : [];
 
   const payload = { summary, counselling, keyIssues, suggestedActions };
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+function normalizeAnsAssessmentIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+
+  const num = (v) => parseOptionalNumberLoose(v);
+
+  const orthostatic = {
+    lying: { sbp: num(b.ansLyingSbp), dbp: num(b.ansLyingDbp), hr: num(b.ansLyingHr) },
+    stand1: { sbp: num(b.ansStand1Sbp), dbp: num(b.ansStand1Dbp), hr: num(b.ansStand1Hr) },
+    stand3: { sbp: num(b.ansStand3Sbp), dbp: num(b.ansStand3Dbp), hr: num(b.ansStand3Hr) }
+  };
+
+  return { patient, orthostatic };
+}
+
+function computeOrthostaticVitals(orthostatic) {
+  const o = orthostatic && typeof orthostatic === "object" ? orthostatic : {};
+  const lying = o.lying && typeof o.lying === "object" ? o.lying : {};
+  const stand1 = o.stand1 && typeof o.stand1 === "object" ? o.stand1 : {};
+  const stand3 = o.stand3 && typeof o.stand3 === "object" ? o.stand3 : {};
+
+  const sbpDrop1 =
+    Number.isFinite(lying.sbp) && Number.isFinite(stand1.sbp) ? lying.sbp - stand1.sbp : null;
+  const dbpDrop1 =
+    Number.isFinite(lying.dbp) && Number.isFinite(stand1.dbp) ? lying.dbp - stand1.dbp : null;
+  const hrRise1 =
+    Number.isFinite(lying.hr) && Number.isFinite(stand1.hr) ? stand1.hr - lying.hr : null;
+
+  const sbpDrop3 =
+    Number.isFinite(lying.sbp) && Number.isFinite(stand3.sbp) ? lying.sbp - stand3.sbp : null;
+  const dbpDrop3 =
+    Number.isFinite(lying.dbp) && Number.isFinite(stand3.dbp) ? lying.dbp - stand3.dbp : null;
+  const hrRise3 =
+    Number.isFinite(lying.hr) && Number.isFinite(stand3.hr) ? stand3.hr - lying.hr : null;
+
+  const ohAt1 =
+    (Number.isFinite(sbpDrop1) && sbpDrop1 >= 20) || (Number.isFinite(dbpDrop1) && dbpDrop1 >= 10);
+  const ohAt3 =
+    (Number.isFinite(sbpDrop3) && sbpDrop3 >= 20) || (Number.isFinite(dbpDrop3) && dbpDrop3 >= 10);
+  const persistentOrthostatic = ohAt1 && ohAt3;
+
+  return {
+    sbpDrop1,
+    dbpDrop1,
+    hrRise1,
+    sbpDrop3,
+    dbpDrop3,
+    hrRise3,
+    orthostaticAt1Min: ohAt1,
+    orthostaticAt3Min: ohAt3,
+    persistentOrthostatic
+  };
+}
+
+async function generateAnsAssessmentWithAi({
+  openai,
+  provider,
+  patient,
+  orthostatic,
+  computed,
+  extractedText,
+  imageFiles,
+  debug
+}) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildAnsAssessmentUserPrompt({
+    patient,
+    orthostatic,
+    computed,
+    extractedText: textForPrompt
+  });
+  const systemPrompt = ANS_ASSESSMENT_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 8192
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed =
+    safeParseJsonObject(raw) ??
+    safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ??
+    null;
+
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -4010,6 +4152,15 @@ gptRouter.post("/exercise-assessment", upload.none(), createExerciseAssessmentHa
 gptRouter.post("/diet-assessment", upload.none(), createDietAssessmentHandler(getGptControllerContext));
 
 gptRouter.post(
+  "/ans-assessment",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createAnsAssessmentHandler(getGptControllerContext)
+);
+
+gptRouter.post(
   "/docs-tests",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -4081,6 +4232,9 @@ function getGptControllerContext() {
     normalizeDietAssessmentIncoming,
     computeDietAssessment,
     generateDietAssessmentSummaryWithAi,
+    normalizeAnsAssessmentIncoming,
+    computeOrthostaticVitals,
+    generateAnsAssessmentWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
