@@ -28,6 +28,8 @@ import { createExerciseAssessmentHandler } from "../Controllers/ExerciseAssessme
 import { createDietAssessmentHandler } from "../Controllers/DietAssessmentController.js";
 import { createAnsAssessmentHandler } from "../Controllers/AnsAssessmentController.js";
 import { createArterialHealthHandler } from "../Controllers/ArterialHealthController.js";
+import { createLungFunctionHandler } from "../Controllers/LungFunctionController.js";
+import { createLiverHealthHandler } from "../Controllers/LiverHealthController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -67,6 +69,8 @@ import {
   ARTERIAL_HEALTH_SYSTEM_PROMPT,
   buildArterialHealthUserPrompt
 } from "../AiPrompts/arterialHealthPrompts.js";
+import { LUNG_FUNCTION_SYSTEM_PROMPT, buildLungFunctionUserPrompt } from "../AiPrompts/lungFunctionPrompts.js";
+import { LIVER_HEALTH_SYSTEM_PROMPT, buildLiverHealthUserPrompt } from "../AiPrompts/liverHealthPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -730,6 +734,67 @@ function normalizeArterialHealthIncoming(body) {
   return { patient };
 }
 
+function normalizeLungFunctionIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const heightCm = parseOptionalNumberLoose(b.heightCm);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null,
+    heightCm: Number.isFinite(heightCm) && heightCm > 0 ? heightCm : null
+  };
+  return { patient };
+}
+
+function normalizeLiverHealthIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const heightCm = parseOptionalNumberLoose(b.heightCm);
+  const weightKg = parseOptionalNumberLoose(b.weightKg);
+  const waistCm = parseOptionalNumberLoose(b.waistCm);
+  const diabetesRaw = typeof b.diabetesOrIfg === "string" ? b.diabetesOrIfg.trim().toLowerCase() : "";
+  const diabetesOrIfg =
+    diabetesRaw === "yes" || diabetesRaw === "true" || diabetesRaw === "1"
+      ? true
+      : diabetesRaw === "no" || diabetesRaw === "false" || diabetesRaw === "0"
+        ? false
+        : null;
+
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null,
+    heightCm: Number.isFinite(heightCm) && heightCm > 0 ? heightCm : null,
+    weightKg: Number.isFinite(weightKg) && weightKg > 0 ? weightKg : null,
+    waistCm: Number.isFinite(waistCm) && waistCm > 0 ? waistCm : null,
+    diabetesOrIfg
+  };
+  return { patient };
+}
+
+function computeLungAgeYears({ sex, heightCm, fev1L }) {
+  const s = typeof sex === "string" ? sex.trim().toLowerCase() : "";
+  if (s !== "male" && s !== "female") return { lungAgeYears: null, formula: "" };
+  if (!Number.isFinite(heightCm) || heightCm <= 0) return { lungAgeYears: null, formula: "" };
+  if (!Number.isFinite(fev1L) || fev1L <= 0) return { lungAgeYears: null, formula: "" };
+
+  const fev1 = fev1L > 20 ? fev1L / 1000 : fev1L;
+  const formula =
+    s === "male"
+      ? "(0.036 * heightCm - 1.178 - fev1L) / 0.028"
+      : "(0.022 * heightCm - 0.005 - fev1L) / 0.0229";
+  const lungAge =
+    s === "male"
+      ? (0.036 * heightCm - 1.178 - fev1) / 0.028
+      : (0.022 * heightCm - 0.005 - fev1) / 0.0229;
+
+  if (!Number.isFinite(lungAge) || lungAge < 0 || lungAge > 150) return { lungAgeYears: null, formula };
+  return { lungAgeYears: Math.round(lungAge), formula };
+}
+
 function computeOrthostaticVitals(orthostatic) {
   const o = orthostatic && typeof orthostatic === "object" ? orthostatic : {};
   const lying = o.lying && typeof o.lying === "object" ? o.lying : {};
@@ -907,6 +972,526 @@ async function generateArterialHealthWithAi({ openai, provider, patient, extract
 
   const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
   const payload = parsed && typeof parsed === "object" ? parsed : {};
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateLungFunctionWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 30000) : "";
+  const userPrompt = buildLungFunctionUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = LUNG_FUNCTION_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 8192
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const spirometry = payload?.spirometry && typeof payload.spirometry === "object" ? payload.spirometry : {};
+  const pre = spirometry?.pre && typeof spirometry.pre === "object" ? spirometry.pre : {};
+  const post = spirometry?.post && typeof spirometry.post === "object" ? spirometry.post : {};
+  const keyValues =
+    spirometry?.keyValues && typeof spirometry.keyValues === "object" ? spirometry.keyValues : {};
+
+  const table = Array.isArray(spirometry?.table) ? spirometry.table : [];
+  const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+  const pickNum = (v) => {
+    const n = parseOptionalNumberLoose(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const pickObserved = (row) =>
+    pickNum(
+      row?.observed ??
+        row?.Observed ??
+        row?.observedValue ??
+        row?.value ??
+        row?.pre ??
+        row?.Pre ??
+        null
+    );
+
+  const findObservedByParam = (predicate) => {
+    for (const r of table) {
+      const p = norm(r?.parameter ?? r?.Parameter ?? "");
+      if (!p) continue;
+      if (!predicate(p)) continue;
+      const n = pickObserved(r);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+
+  const fev1FromTable = findObservedByParam((p) => p.includes("fev1") && !p.includes("/"));
+  const fvcFromTable = findObservedByParam((p) => p === "fvc" || (p.includes("fvc") && !p.includes("fev")));
+  const ratioFromTable = findObservedByParam((p) => p.includes("fev1/fvc"));
+  const pefFromTable = findObservedByParam((p) => p === "pef" || p.includes("pef"));
+  const fef2575FromTable = findObservedByParam((p) => p.includes("fef") && (p.includes("25-75") || p.includes("25–75") || p.includes("25 75")));
+
+  const fev1Candidate = pickNum(keyValues?.fev1L) ?? pickNum(pre?.fev1L) ?? fev1FromTable;
+  const fvcCandidate = pickNum(keyValues?.fvcL) ?? pickNum(pre?.fvcL) ?? fvcFromTable;
+  const ratioCandidate = pickNum(keyValues?.fev1FvcPercent) ?? pickNum(pre?.fev1FvcRatio) ?? ratioFromTable;
+  const pefCandidate = pickNum(keyValues?.pef) ?? pickNum(pre?.pef) ?? pefFromTable;
+  const fefCandidate = pickNum(keyValues?.fef25_75) ?? pickNum(pre?.fef25_75) ?? fef2575FromTable;
+
+  const fev1L = Number.isFinite(fev1Candidate) ? (fev1Candidate > 20 ? fev1Candidate / 1000 : fev1Candidate) : null;
+  const fvcL = Number.isFinite(fvcCandidate) ? (fvcCandidate > 20 ? fvcCandidate / 1000 : fvcCandidate) : null;
+
+  payload.spirometry = payload.spirometry && typeof payload.spirometry === "object" ? payload.spirometry : {};
+  payload.spirometry.keyValues = {
+    ...keyValues,
+    fev1L: keyValues?.fev1L ?? (Number.isFinite(fev1L) ? fev1L : null),
+    fvcL: keyValues?.fvcL ?? (Number.isFinite(fvcL) ? fvcL : null),
+    fev1FvcPercent: keyValues?.fev1FvcPercent ?? (Number.isFinite(ratioCandidate) ? ratioCandidate : null),
+    pef: keyValues?.pef ?? (Number.isFinite(pefCandidate) ? pefCandidate : null),
+    fef25_75: keyValues?.fef25_75 ?? (Number.isFinite(fefCandidate) ? fefCandidate : null),
+    units: keyValues?.units && typeof keyValues.units === "object" ? keyValues.units : { pef: "", fef25_75: "" }
+  };
+  payload.spirometry.interpretation =
+    typeof spirometry?.interpretation === "string"
+      ? spirometry.interpretation
+      : typeof pre?.interpretation === "string"
+        ? pre.interpretation
+        : typeof post?.interpretation === "string"
+          ? post.interpretation
+          : "";
+
+  const pickText = (v) => {
+    if (typeof v === "string") return v.trim() ? v.trim() : null;
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    return null;
+  };
+  const normalizedTable = table.map((row) => {
+    const parameter =
+      pickText(row?.parameter) ??
+      pickText(row?.Parameter) ??
+      pickText(row?.parameterName) ??
+      pickText(row?.ParameterName) ??
+      pickText(row?.param) ??
+      pickText(row?.name) ??
+      pickText(row?.testName) ??
+      pickText(row?.test) ??
+      pickText(row?.metric) ??
+      "";
+    const observed =
+      pickText(row?.observed) ??
+      pickText(row?.Observed) ??
+      pickText(row?.observedValue) ??
+      pickText(row?.value) ??
+      pickText(row?.pre) ??
+      pickText(row?.Pre) ??
+      "";
+    const predicted = pickText(row?.predicted) ?? pickText(row?.Predicted) ?? "";
+    const percentPredicted =
+      pickText(row?.percentPredicted) ?? pickText(row?.percent) ?? pickText(row?.["%Pred"]) ?? pickText(row?.percentPred) ?? "";
+    const units = pickText(row?.units) ?? pickText(row?.Units) ?? "";
+    const notes = pickText(row?.notes) ?? pickText(row?.Notes) ?? "";
+    return { parameter, observed, predicted, percentPredicted, units, notes };
+  });
+
+  payload.spirometry.table = normalizedTable;
+
+  const sexUsed = typeof patient?.sex === "string" ? patient.sex : "";
+  const heightCmUsed = Number.isFinite(patient?.heightCm) ? patient.heightCm : null;
+  const { lungAgeYears, formula } = computeLungAgeYears({ sex: sexUsed, heightCm: heightCmUsed, fev1L });
+
+  payload.lungAge = {
+    sexUsed,
+    heightCmUsed,
+    fev1LUsed: fev1L,
+    lungAgeYears,
+    formula
+  };
+
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+function computeBmiKgM2({ heightCm, weightKg }) {
+  if (!Number.isFinite(heightCm) || heightCm <= 0) return null;
+  if (!Number.isFinite(weightKg) || weightKg <= 0) return null;
+  const m = heightCm / 100;
+  const bmi = weightKg / (m * m);
+  if (!Number.isFinite(bmi) || bmi <= 0) return null;
+  return bmi;
+}
+
+function interpretNfs(score) {
+  if (!Number.isFinite(score)) return "";
+  if (score < -1.455) return "Advanced fibrosis absent (F0–F2); NPV 93%";
+  if (score <= 0.675) return "Indeterminate";
+  return "Advanced fibrosis present (F3–F4); PPV 90%";
+}
+
+function interpretFli(score) {
+  if (!Number.isFinite(score)) return "";
+  if (score < 30) return "Fatty liver ruled out — Sensitivity 87%, LR− 0.2";
+  if (score < 60) return "Indeterminate";
+  return "Fatty liver present — Specificity 86%, LR+ 4.3";
+}
+
+function interpretFib4(score) {
+  if (!Number.isFinite(score)) return "";
+  if (score < 1.45) return "Advanced fibrosis absent (F0–F2) — NPV 90%";
+  if (score <= 3.25) return "Indeterminate — biopsy may be needed";
+  return "Advanced fibrosis present (F3–F4) — Specificity 97%, PPV 65%";
+}
+
+function interpretBard(score) {
+  if (!Number.isFinite(score)) return "";
+  if (score <= 1) return "Advanced fibrosis absent — High NPV of 96%";
+  return "Advanced fibrosis present — Further evaluation needed";
+}
+
+function interpretElastographyKpa(kPa) {
+  if (!Number.isFinite(kPa)) return "";
+  if (kPa < 5) return "Normal";
+  if (kPa < 7) return "Mild fibrosis risk";
+  if (kPa < 9) return "Significant fibrosis possible";
+  if (kPa < 12) return "Advanced fibrosis";
+  return "Cirrhosis likely";
+}
+
+function interpretCap(cap) {
+  if (!Number.isFinite(cap)) return "";
+  if (cap < 238) return "Normal";
+  if (cap < 260) return "Mild fatty liver";
+  if (cap < 290) return "Moderate fatty liver";
+  return "Severe fatty liver";
+}
+
+async function generateLiverHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 30000) : "";
+  const userPrompt = buildLiverHealthUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = LIVER_HEALTH_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 8192
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 8192
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root = payload?.liverHealth && typeof payload.liverHealth === "object" ? payload.liverHealth : payload;
+  const labs = root?.labs && typeof root.labs === "object" ? root.labs : {};
+  const anthropometry = root?.anthropometry && typeof root.anthropometry === "object" ? root.anthropometry : {};
+  const metabolic = root?.metabolic && typeof root.metabolic === "object" ? root.metabolic : {};
+  const elastography = root?.elastography && typeof root.elastography === "object" ? root.elastography : {};
+  const ultrasound = root?.ultrasound && typeof root.ultrasound === "object" ? root.ultrasound : {};
+
+  const tableIncoming = Array.isArray(root?.table) ? root.table : [];
+  const pickText = (v) => {
+    if (typeof v === "string") return v.trim() ? v.trim() : null;
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    return null;
+  };
+  const normalizedTable = tableIncoming.map((row) => {
+    const parameter =
+      pickText(row?.parameter) ??
+      pickText(row?.Parameter) ??
+      pickText(row?.parameterName) ??
+      pickText(row?.ParameterName) ??
+      pickText(row?.param) ??
+      pickText(row?.name) ??
+      pickText(row?.testName) ??
+      pickText(row?.test) ??
+      pickText(row?.metric) ??
+      "";
+    const observed =
+      pickText(row?.observed) ??
+      pickText(row?.Observed) ??
+      pickText(row?.observedValue) ??
+      pickText(row?.value) ??
+      pickText(row?.result) ??
+      "";
+    const units = pickText(row?.units) ?? pickText(row?.Units) ?? "";
+    const notes = pickText(row?.notes) ?? pickText(row?.Notes) ?? "";
+    return { parameter, observed, units, notes };
+  });
+
+  const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+  const pickNum = (v) => {
+    const n = parseOptionalNumberLoose(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const findObservedByParam = (predicate) => {
+    for (const r of normalizedTable) {
+      const p = norm(r?.parameter);
+      if (!p) continue;
+      if (!predicate(p)) continue;
+      const n = pickNum(r?.observed);
+      if (Number.isFinite(n)) return n;
+    }
+    return null;
+  };
+
+  const astFromTable = findObservedByParam((p) => p === "ast" || p.includes("sgot"));
+  const altFromTable = findObservedByParam((p) => p === "alt" || p.includes("sgpt"));
+  const plateletsFromTable = findObservedByParam((p) => p.includes("platelet"));
+  const albuminFromTable = findObservedByParam((p) => p === "albumin" || p.includes("serum albumin"));
+  const tgFromTable = findObservedByParam((p) => p.includes("triglycer"));
+  const ggtFromTable = findObservedByParam((p) => p === "ggt" || p.includes("gamma"));
+
+  const heightCmCandidate = pickNum(anthropometry?.heightCm) ?? (Number.isFinite(patient?.heightCm) ? patient.heightCm : null);
+  const weightKgCandidate = pickNum(anthropometry?.weightKg) ?? (Number.isFinite(patient?.weightKg) ? patient.weightKg : null);
+  const waistCmCandidate =
+    pickNum(anthropometry?.waistCircumferenceCm) ?? (Number.isFinite(patient?.waistCm) ? patient.waistCm : null);
+  const bmiCandidate =
+    computeBmiKgM2({ heightCm: heightCmCandidate, weightKg: weightKgCandidate }) ?? pickNum(anthropometry?.bmiKg_m2);
+
+  const diabetesCandidateRaw = metabolic?.ifgOrDiabetes;
+  const diabetesCandidate =
+    typeof patient?.diabetesOrIfg === "boolean"
+      ? patient.diabetesOrIfg
+      : typeof diabetesCandidateRaw === "boolean"
+        ? diabetesCandidateRaw
+        : typeof diabetesCandidateRaw === "string"
+          ? ["yes", "true", "1"].includes(diabetesCandidateRaw.trim().toLowerCase())
+          : null;
+
+  const ageCandidate = Number.isFinite(patient?.age) ? patient.age : null;
+
+  const astCandidate = pickNum(labs?.astIU_L) ?? astFromTable;
+  const altCandidate = pickNum(labs?.altIU_L) ?? altFromTable;
+
+  let plateletCandidate = pickNum(labs?.plateletCount10e9_L) ?? plateletsFromTable;
+  if (Number.isFinite(plateletCandidate) && plateletCandidate > 2000) plateletCandidate = plateletCandidate / 1000;
+
+  let albuminCandidate = pickNum(labs?.albuminG_dL) ?? albuminFromTable;
+  if (Number.isFinite(albuminCandidate) && albuminCandidate > 20) albuminCandidate = albuminCandidate / 10;
+
+  const triglyceridesCandidate = pickNum(labs?.triglyceridesMg_dL) ?? tgFromTable;
+  const ggtCandidate = pickNum(labs?.ggtIU_L) ?? ggtFromTable;
+
+  const astAltRatio =
+    Number.isFinite(astCandidate) && astCandidate > 0 && Number.isFinite(altCandidate) && altCandidate > 0
+      ? astCandidate / altCandidate
+      : null;
+
+  const nfsScore =
+    Number.isFinite(ageCandidate) &&
+    Number.isFinite(bmiCandidate) &&
+    typeof diabetesCandidate === "boolean" &&
+    Number.isFinite(astAltRatio) &&
+    Number.isFinite(plateletCandidate) &&
+    Number.isFinite(albuminCandidate)
+      ? -1.675 +
+        0.037 * ageCandidate +
+        0.094 * bmiCandidate +
+        1.13 * (diabetesCandidate ? 1 : 0) -
+        0.99 * astAltRatio -
+        0.013 * plateletCandidate -
+        0.66 * albuminCandidate
+      : null;
+
+  const yForFli =
+    Number.isFinite(triglyceridesCandidate) &&
+    triglyceridesCandidate > 0 &&
+    Number.isFinite(bmiCandidate) &&
+    Number.isFinite(ggtCandidate) &&
+    ggtCandidate > 0 &&
+    Number.isFinite(waistCmCandidate)
+      ? 0.953 * Math.log(triglyceridesCandidate) +
+        0.139 * bmiCandidate +
+        0.718 * Math.log(ggtCandidate) +
+        0.053 * waistCmCandidate -
+        15.745
+      : null;
+  const fliScore =
+    Number.isFinite(yForFli) ? (Math.exp(yForFli) / (1 + Math.exp(yForFli))) * 100 : null;
+
+  const fib4Score =
+    Number.isFinite(ageCandidate) &&
+    Number.isFinite(astCandidate) &&
+    astCandidate > 0 &&
+    Number.isFinite(altCandidate) &&
+    altCandidate > 0 &&
+    Number.isFinite(plateletCandidate) &&
+    plateletCandidate > 0
+      ? (ageCandidate * astCandidate) / (plateletCandidate * Math.sqrt(altCandidate))
+      : null;
+
+  const bardScore =
+    Number.isFinite(astAltRatio) && Number.isFinite(bmiCandidate) && typeof diabetesCandidate === "boolean"
+      ? (astAltRatio >= 0.8 ? 2 : 0) + (bmiCandidate >= 28 ? 1 : 0) + (diabetesCandidate ? 1 : 0)
+      : null;
+
+  const kPaCandidate = pickNum(elastography?.kPa);
+  const capCandidate = pickNum(elastography?.cap);
+
+  const computed = {
+    inputs: {
+      ageYears: ageCandidate,
+      heightCm: Number.isFinite(heightCmCandidate) ? heightCmCandidate : null,
+      weightKg: Number.isFinite(weightKgCandidate) ? weightKgCandidate : null,
+      waistCircumferenceCm: Number.isFinite(waistCmCandidate) ? waistCmCandidate : null,
+      bmiKg_m2: Number.isFinite(bmiCandidate) ? bmiCandidate : null,
+      ifgOrDiabetes: typeof diabetesCandidate === "boolean" ? diabetesCandidate : null,
+      astIU_L: Number.isFinite(astCandidate) ? astCandidate : null,
+      altIU_L: Number.isFinite(altCandidate) ? altCandidate : null,
+      plateletCount10e9_L: Number.isFinite(plateletCandidate) ? plateletCandidate : null,
+      albuminG_dL: Number.isFinite(albuminCandidate) ? albuminCandidate : null,
+      triglyceridesMg_dL: Number.isFinite(triglyceridesCandidate) ? triglyceridesCandidate : null,
+      ggtIU_L: Number.isFinite(ggtCandidate) ? ggtCandidate : null,
+      astAltRatio: Number.isFinite(astAltRatio) ? astAltRatio : null
+    },
+    nfs: {
+      score: Number.isFinite(nfsScore) ? nfsScore : null,
+      interpretation: interpretNfs(nfsScore)
+    },
+    fli: {
+      score: Number.isFinite(fliScore) ? fliScore : null,
+      interpretation: interpretFli(fliScore)
+    },
+    fib4: {
+      score: Number.isFinite(fib4Score) ? fib4Score : null,
+      interpretation: interpretFib4(fib4Score)
+    },
+    bard: {
+      score: Number.isFinite(bardScore) ? bardScore : null,
+      interpretation: interpretBard(bardScore)
+    },
+    elastography: {
+      kPa: Number.isFinite(kPaCandidate) ? kPaCandidate : null,
+      meaning: interpretElastographyKpa(kPaCandidate)
+    },
+    steatosis: {
+      cap: Number.isFinite(capCandidate) ? capCandidate : null,
+      fatLevel: interpretCap(capCandidate)
+    }
+  };
+
+  const normalized = {
+    labs: {
+      astIU_L: Number.isFinite(astCandidate) ? astCandidate : null,
+      altIU_L: Number.isFinite(altCandidate) ? altCandidate : null,
+      plateletCount10e9_L: Number.isFinite(plateletCandidate) ? plateletCandidate : null,
+      albuminG_dL: Number.isFinite(albuminCandidate) ? albuminCandidate : null,
+      triglyceridesMg_dL: Number.isFinite(triglyceridesCandidate) ? triglyceridesCandidate : null,
+      ggtIU_L: Number.isFinite(ggtCandidate) ? ggtCandidate : null
+    },
+    anthropometry: {
+      heightCm: Number.isFinite(heightCmCandidate) ? heightCmCandidate : null,
+      weightKg: Number.isFinite(weightKgCandidate) ? weightKgCandidate : null,
+      bmiKg_m2: Number.isFinite(bmiCandidate) ? bmiCandidate : null,
+      waistCircumferenceCm: Number.isFinite(waistCmCandidate) ? waistCmCandidate : null
+    },
+    metabolic: { ifgOrDiabetes: typeof diabetesCandidate === "boolean" ? diabetesCandidate : null },
+    elastography: {
+      kPa: Number.isFinite(kPaCandidate) ? kPaCandidate : null,
+      cap: Number.isFinite(capCandidate) ? capCandidate : null,
+      notes: typeof elastography?.notes === "string" ? elastography.notes : ""
+    },
+    ultrasound: {
+      findings: typeof ultrasound?.findings === "string" ? ultrasound.findings : "",
+      impression: typeof ultrasound?.impression === "string" ? ultrasound.impression : "",
+      mentionsFattyLiver:
+        typeof ultrasound?.mentionsFattyLiver === "boolean"
+          ? ultrasound.mentionsFattyLiver
+          : typeof ultrasound?.mentionsFattyLiver === "string"
+            ? ["yes", "true", "1"].includes(ultrasound.mentionsFattyLiver.trim().toLowerCase())
+            : null
+    },
+    table: normalizedTable,
+    notes: Array.isArray(root?.notes) ? root.notes : [],
+    computed
+  };
+
+  payload.liverHealth = normalized;
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -4249,6 +4834,24 @@ gptRouter.post(
 );
 
 gptRouter.post(
+  "/lung-function",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createLungFunctionHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/liver-health",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createLiverHealthHandler(getGptControllerContext)
+);
+
+gptRouter.post(
   "/docs-tests",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -4325,6 +4928,10 @@ function getGptControllerContext() {
     generateAnsAssessmentWithAi,
     normalizeArterialHealthIncoming,
     generateArterialHealthWithAi,
+    normalizeLungFunctionIncoming,
+    generateLungFunctionWithAi,
+    normalizeLiverHealthIncoming,
+    generateLiverHealthWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
