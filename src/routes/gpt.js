@@ -30,6 +30,9 @@ import { createAnsAssessmentHandler } from "../Controllers/AnsAssessmentControll
 import { createArterialHealthHandler } from "../Controllers/ArterialHealthController.js";
 import { createLungFunctionHandler } from "../Controllers/LungFunctionController.js";
 import { createLiverHealthHandler } from "../Controllers/LiverHealthController.js";
+import { createEyeHealthHandler } from "../Controllers/EyeHealthController.js";
+import { createKidneyHealthHandler } from "../Controllers/KidneyHealthController.js";
+import { createDiabetesRiskHandler } from "../Controllers/DiabetesRiskController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -71,6 +74,9 @@ import {
 } from "../AiPrompts/arterialHealthPrompts.js";
 import { LUNG_FUNCTION_SYSTEM_PROMPT, buildLungFunctionUserPrompt } from "../AiPrompts/lungFunctionPrompts.js";
 import { LIVER_HEALTH_SYSTEM_PROMPT, buildLiverHealthUserPrompt } from "../AiPrompts/liverHealthPrompts.js";
+import { EYE_HEALTH_SYSTEM_PROMPT, buildEyeHealthUserPrompt } from "../AiPrompts/eyeHealthPrompts.js";
+import { KIDNEY_HEALTH_SYSTEM_PROMPT, buildKidneyHealthUserPrompt } from "../AiPrompts/kidneyHealthPrompts.js";
+import { DIABETES_RISK_SYSTEM_PROMPT, buildDiabetesRiskUserPrompt } from "../AiPrompts/diabetesRiskPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -771,6 +777,63 @@ function normalizeLiverHealthIncoming(body) {
     weightKg: Number.isFinite(weightKg) && weightKg > 0 ? weightKg : null,
     waistCm: Number.isFinite(waistCm) && waistCm > 0 ? waistCm : null,
     diabetesOrIfg
+  };
+  return { patient };
+}
+
+function normalizeEyeHealthIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+
+  const diabetesRaw = typeof b.diabetes === "string" ? b.diabetes.trim().toLowerCase() : "";
+  const diabetes =
+    diabetesRaw === "yes" || diabetesRaw === "true" || diabetesRaw === "1"
+      ? true
+      : diabetesRaw === "no" || diabetesRaw === "false" || diabetesRaw === "0"
+        ? false
+        : null;
+  const diabetesYears = parseOptionalNumberLoose(b.diabetesYears);
+
+  const hypertensionRaw = typeof b.hypertension === "string" ? b.hypertension.trim().toLowerCase() : "";
+  const hypertension =
+    hypertensionRaw === "yes" || hypertensionRaw === "true" || hypertensionRaw === "1"
+      ? true
+      : hypertensionRaw === "no" || hypertensionRaw === "false" || hypertensionRaw === "0"
+        ? false
+        : null;
+
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null,
+    diabetes,
+    diabetesYears: Number.isFinite(diabetesYears) && diabetesYears >= 0 ? diabetesYears : null,
+    hypertension
+  };
+  return { patient };
+}
+
+function normalizeKidneyHealthIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+  return { patient };
+}
+
+function normalizeDiabetesRiskIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
   };
   return { patient };
 }
@@ -1492,6 +1555,336 @@ async function generateLiverHealthWithAi({ openai, provider, patient, extractedT
   };
 
   payload.liverHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateEyeHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildEyeHealthUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = EYE_HEALTH_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root = payload?.eyeHealth && typeof payload.eyeHealth === "object" ? payload.eyeHealth : payload;
+  const retinoscopy = root?.retinoscopy && typeof root.retinoscopy === "object" ? root.retinoscopy : {};
+
+  const normalizeYesNo = (v) => {
+    if (typeof v !== "string") return "";
+    const s = v.trim().toLowerCase();
+    if (s === "yes" || s === "y" || s === "present" || s === "positive") return "yes";
+    if (s === "no" || s === "n" || s === "absent" || s === "negative") return "no";
+    return "";
+  };
+
+  const normalized = {
+    retinoscopy: {
+      retinopathy: normalizeYesNo(retinoscopy?.retinopathy),
+      type: typeof retinoscopy?.type === "string" ? retinoscopy.type : "",
+      severity: typeof retinoscopy?.severity === "string" ? retinoscopy.severity : "",
+      findings: typeof retinoscopy?.findings === "string" ? retinoscopy.findings : "",
+      impression: typeof retinoscopy?.impression === "string" ? retinoscopy.impression : ""
+    },
+    otherFindings: typeof root?.otherFindings === "string" ? root.otherFindings : "",
+    notes: Array.isArray(root?.notes) ? root.notes : []
+  };
+
+  payload.eyeHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+function computeKidneyFailureRisk({ ageYears, sex, egfr, uacr }) {
+  const age = Number.isFinite(ageYears) ? ageYears : null;
+  const male = sex === "male" ? 1 : 0;
+  const e = Number.isFinite(egfr) ? egfr : null;
+  const u = Number.isFinite(uacr) ? uacr : null;
+  if (!Number.isFinite(age) || age <= 0) return { risk2YearPct: null, risk5YearPct: null };
+  if (!Number.isFinite(e) || e <= 0) return { risk2YearPct: null, risk5YearPct: null };
+  if (!Number.isFinite(u) || u <= 0) return { risk2YearPct: null, risk5YearPct: null };
+
+  const lnU = Math.log(u);
+  const lp =
+    -0.2201 * (age / 10 - 7.036) +
+    0.2467 * (male - 0.5642) +
+    -0.5567 * (e / 5 - 7.222) +
+    0.451 * (lnU - 5.137);
+  const expLp = Math.exp(lp);
+  const r2 = 1 - Math.pow(0.9832, expLp);
+  const r5 = 1 - Math.pow(0.9365, expLp);
+
+  const toPct = (x) => {
+    if (!Number.isFinite(x)) return null;
+    const pct = x * 100;
+    if (!Number.isFinite(pct)) return null;
+    return Math.max(0, Math.min(100, pct));
+  };
+
+  return { risk2YearPct: toPct(r2), risk5YearPct: toPct(r5) };
+}
+
+function computeKidneyAge({ ageYears, egfr }) {
+  const age = Number.isFinite(ageYears) ? ageYears : null;
+  const e = Number.isFinite(egfr) ? egfr : null;
+  if (!Number.isFinite(age) || age <= 0) return { normalEgfrForAge: null, kidneyAgeYears: null, ckdScoreYears: null, ckd20Plus: null };
+  if (!Number.isFinite(e) || e <= 0) return { normalEgfrForAge: null, kidneyAgeYears: null, ckdScoreYears: null, ckd20Plus: null };
+
+  const normalEgfrForAge = 105 - 0.9 * (age - 40);
+  const kidneyAge = 40 + (105 - e) / 0.9;
+  const ckdScore = kidneyAge - age;
+  const ckd20Plus = Number.isFinite(ckdScore) ? ckdScore >= 20 : null;
+
+  return { normalEgfrForAge, kidneyAgeYears: kidneyAge, ckdScoreYears: ckdScore, ckd20Plus };
+}
+
+function computeInsulinResistance({ fastingGlucoseMg_dL, fastingInsulinUu_mL }) {
+  const g = Number.isFinite(fastingGlucoseMg_dL) ? fastingGlucoseMg_dL : null;
+  const i = Number.isFinite(fastingInsulinUu_mL) ? fastingInsulinUu_mL : null;
+  if (!Number.isFinite(g) || !Number.isFinite(i) || g <= 0 || i <= 0) {
+    return { homaIr: null, quicki: null };
+  }
+  const homaIr = (g * i) / 405;
+  const quicki = 1 / (Math.log10(i) + Math.log10(g));
+  return { homaIr, quicki };
+}
+
+async function generateKidneyHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildKidneyHealthUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = KIDNEY_HEALTH_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root =
+    payload?.kidneyHealth && typeof payload.kidneyHealth === "object"
+      ? payload.kidneyHealth
+      : payload?.renalHealth && typeof payload.renalHealth === "object"
+        ? payload.renalHealth
+        : payload;
+  const labs = root?.labs && typeof root.labs === "object" ? root.labs : {};
+
+  const egfr = parseOptionalNumberLoose(labs?.egfrMlMin1_73m2 ?? labs?.egfr ?? root?.egfr);
+  const uacr = parseOptionalNumberLoose(labs?.uacrMg_g ?? labs?.uacr ?? labs?.acr ?? root?.uacr);
+  const serumCreatinine = parseOptionalNumberLoose(labs?.serumCreatinineMg_dL ?? labs?.creatinine ?? root?.serumCreatinine);
+
+  const ageYears = Number.isFinite(patient?.age) ? patient.age : null;
+  const sex = typeof patient?.sex === "string" ? patient.sex : "";
+  const computed = {
+    kidneyFailureRisk: computeKidneyFailureRisk({ ageYears, sex, egfr, uacr }),
+    kidneyAge: computeKidneyAge({ ageYears, egfr })
+  };
+
+  const normalized = {
+    labs: {
+      egfrMlMin1_73m2: Number.isFinite(egfr) ? egfr : null,
+      uacrMg_g: Number.isFinite(uacr) ? uacr : null,
+      serumCreatinineMg_dL: Number.isFinite(serumCreatinine) ? serumCreatinine : null
+    },
+    otherFindings: typeof root?.otherFindings === "string" ? root.otherFindings : "",
+    notes: Array.isArray(root?.notes) ? root.notes : [],
+    computed
+  };
+
+  payload.kidneyHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateDiabetesRiskWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildDiabetesRiskUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = DIABETES_RISK_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root =
+    payload?.diabetesRisk && typeof payload.diabetesRisk === "object"
+      ? payload.diabetesRisk
+      : payload?.diabetes && typeof payload.diabetes === "object"
+        ? payload.diabetes
+        : payload;
+  const labs = root?.labs && typeof root.labs === "object" ? root.labs : {};
+
+  const hba1cPct = parseOptionalNumberLoose(labs?.hba1cPct ?? labs?.hba1c ?? root?.hba1c);
+  const fastingGlucoseMg_dL = parseOptionalNumberLoose(
+    labs?.fastingGlucoseMg_dL ?? labs?.fastingGlucose ?? labs?.fbs ?? root?.fastingGlucose
+  );
+  const fastingInsulinUu_mL = parseOptionalNumberLoose(
+    labs?.fastingInsulinUu_mL ?? labs?.fastingInsulin ?? labs?.insulin ?? root?.fastingInsulin
+  );
+  const ldlMg_dL = parseOptionalNumberLoose(labs?.ldlMg_dL ?? labs?.ldl ?? labs?.ldlCholesterol ?? root?.ldl);
+
+  const computed = {
+    insulinResistance: computeInsulinResistance({ fastingGlucoseMg_dL, fastingInsulinUu_mL })
+  };
+
+  const normalized = {
+    labs: {
+      hba1cPct: Number.isFinite(hba1cPct) ? hba1cPct : null,
+      fastingGlucoseMg_dL: Number.isFinite(fastingGlucoseMg_dL) ? fastingGlucoseMg_dL : null,
+      fastingInsulinUu_mL: Number.isFinite(fastingInsulinUu_mL) ? fastingInsulinUu_mL : null,
+      ldlMg_dL: Number.isFinite(ldlMg_dL) ? ldlMg_dL : null
+    },
+    computed
+  };
+
+  payload.diabetesRisk = normalized;
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -4852,6 +5245,33 @@ gptRouter.post(
 );
 
 gptRouter.post(
+  "/eye-health",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createEyeHealthHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/kidney-health",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createKidneyHealthHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/diabetes-risk",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createDiabetesRiskHandler(getGptControllerContext)
+);
+
+gptRouter.post(
   "/docs-tests",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -4932,6 +5352,12 @@ function getGptControllerContext() {
     generateLungFunctionWithAi,
     normalizeLiverHealthIncoming,
     generateLiverHealthWithAi,
+    normalizeEyeHealthIncoming,
+    generateEyeHealthWithAi,
+    normalizeKidneyHealthIncoming,
+    generateKidneyHealthWithAi,
+    normalizeDiabetesRiskIncoming,
+    generateDiabetesRiskWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
