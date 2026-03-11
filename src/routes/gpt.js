@@ -33,6 +33,9 @@ import { createLiverHealthHandler } from "../Controllers/LiverHealthController.j
 import { createEyeHealthHandler } from "../Controllers/EyeHealthController.js";
 import { createKidneyHealthHandler } from "../Controllers/KidneyHealthController.js";
 import { createDiabetesRiskHandler } from "../Controllers/DiabetesRiskController.js";
+import { createWomenHealthHandler } from "../Controllers/WomenHealthController.js";
+import { createBoneHealthHandler } from "../Controllers/BoneHealthController.js";
+import { createAdultVaccinationHandler } from "../Controllers/AdultVaccinationController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -77,6 +80,12 @@ import { LIVER_HEALTH_SYSTEM_PROMPT, buildLiverHealthUserPrompt } from "../AiPro
 import { EYE_HEALTH_SYSTEM_PROMPT, buildEyeHealthUserPrompt } from "../AiPrompts/eyeHealthPrompts.js";
 import { KIDNEY_HEALTH_SYSTEM_PROMPT, buildKidneyHealthUserPrompt } from "../AiPrompts/kidneyHealthPrompts.js";
 import { DIABETES_RISK_SYSTEM_PROMPT, buildDiabetesRiskUserPrompt } from "../AiPrompts/diabetesRiskPrompts.js";
+import { WOMEN_HEALTH_SYSTEM_PROMPT, buildWomenHealthUserPrompt } from "../AiPrompts/womenHealthPrompts.js";
+import { BONE_HEALTH_SYSTEM_PROMPT, buildBoneHealthUserPrompt } from "../AiPrompts/boneHealthPrompts.js";
+import {
+  ADULT_VACCINATION_SYSTEM_PROMPT,
+  buildAdultVaccinationUserPrompt
+} from "../AiPrompts/adultVaccinationPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -827,6 +836,42 @@ function normalizeKidneyHealthIncoming(body) {
 }
 
 function normalizeDiabetesRiskIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+  return { patient };
+}
+
+function normalizeWomenHealthIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+  return { patient };
+}
+
+function normalizeBoneHealthIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+  return { patient };
+}
+
+function normalizeAdultVaccinationIncoming(body) {
   const b = body && typeof body === "object" ? body : {};
   const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
   const age = parseOptionalIntegerLoose(b.age);
@@ -1885,6 +1930,413 @@ async function generateDiabetesRiskWithAi({ openai, provider, patient, extracted
   };
 
   payload.diabetesRisk = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateWomenHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildWomenHealthUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = WOMEN_HEALTH_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root =
+    payload?.womenHealth && typeof payload.womenHealth === "object"
+      ? payload.womenHealth
+      : payload?.women && typeof payload.women === "object"
+        ? payload.women
+        : payload;
+
+  const toBool = (v) => {
+    if (v === true || v === false) return v;
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (s === "yes" || s === "true" || s === "1") return true;
+    if (s === "no" || s === "false" || s === "0") return false;
+    return null;
+  };
+
+  const breast = root?.breast && typeof root.breast === "object" ? root.breast : {};
+  const cervix = root?.cervix && typeof root.cervix === "object" ? root.cervix : {};
+  const ovary = root?.ovary && typeof root.ovary === "object" ? root.ovary : {};
+  const uterus = root?.uterus && typeof root.uterus === "object" ? root.uterus : {};
+
+  const numberOfBreastBiopsies = parseOptionalNumberLoose(
+    breast?.numberOfBreastBiopsies ?? breast?.breastBiopsiesCount ?? breast?.biopsies
+  );
+  const firstDegreeRelativesBreastCancerCount = parseOptionalNumberLoose(
+    breast?.firstDegreeRelativesBreastCancerCount ?? breast?.firstDegreeRelatives ?? breast?.relativesWithBreastCancer
+  );
+  const ca125 = parseOptionalNumberLoose(ovary?.ca125 ?? root?.ca125 ?? root?.ca_125);
+  const endometrialThicknessMm = parseOptionalNumberLoose(
+    uterus?.endometrialThicknessMm ?? uterus?.endometrialThickness ?? root?.endometrialThicknessMm
+  );
+
+  const normalized = {
+    breast: {
+      raceEthnicity: typeof breast?.raceEthnicity === "string" ? breast.raceEthnicity : "",
+      numberOfBreastBiopsies: Number.isFinite(numberOfBreastBiopsies) ? numberOfBreastBiopsies : null,
+      atypicalHyperplasia: toBool(breast?.atypicalHyperplasia),
+      firstDegreeRelativesBreastCancerCount: Number.isFinite(firstDegreeRelativesBreastCancerCount)
+        ? firstDegreeRelativesBreastCancerCount
+        : null,
+      personalBreastCancerHistory: toBool(breast?.personalBreastCancerHistory),
+      mammogramSummary: typeof breast?.mammogramSummary === "string" ? breast.mammogramSummary : ""
+    },
+    cervix: {
+      papSmearSummary: typeof cervix?.papSmearSummary === "string" ? cervix.papSmearSummary : "",
+      hpvSummary: typeof cervix?.hpvSummary === "string" ? cervix.hpvSummary : ""
+    },
+    ovary: {
+      transvaginalUltrasoundSummary:
+        typeof ovary?.transvaginalUltrasoundSummary === "string" ? ovary.transvaginalUltrasoundSummary : "",
+      ca125: Number.isFinite(ca125) ? ca125 : null
+    },
+    uterus: {
+      endometrialThicknessMm: Number.isFinite(endometrialThicknessMm) ? endometrialThicknessMm : null,
+      endometrialBiopsySummary: typeof uterus?.endometrialBiopsySummary === "string" ? uterus.endometrialBiopsySummary : ""
+    },
+    notes: Array.isArray(root?.notes) ? root.notes : []
+  };
+
+  payload.womenHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateBoneHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildBoneHealthUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = BONE_HEALTH_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root =
+    payload?.boneHealth && typeof payload.boneHealth === "object"
+      ? payload.boneHealth
+      : payload?.bone && typeof payload.bone === "object"
+        ? payload.bone
+        : payload;
+
+  const dexa = root?.dexa && typeof root.dexa === "object" ? root.dexa : {};
+  const audiogram = root?.audiogram && typeof root.audiogram === "object" ? root.audiogram : {};
+  const frax = root?.frax && typeof root.frax === "object" ? root.frax : {};
+  const falls = root?.falls && typeof root.falls === "object" ? root.falls : {};
+  const frailty = root?.frailty && typeof root.frailty === "object" ? root.frailty : {};
+  const cognition = root?.cognition && typeof root.cognition === "object" ? root.cognition : {};
+
+  const femoralNeckBmdGcm2 = parseOptionalNumberLoose(dexa?.femoralNeckBmdGcm2 ?? dexa?.femoralNeckBmd);
+  const femoralNeckTScore = parseOptionalNumberLoose(dexa?.femoralNeckTScore ?? dexa?.tScoreFemoralNeck);
+  const totalHipTScore = parseOptionalNumberLoose(dexa?.totalHipTScore ?? dexa?.tScoreTotalHip);
+  const lumbarSpineTScore = parseOptionalNumberLoose(dexa?.lumbarSpineTScore ?? dexa?.tScoreLumbarSpine);
+  const majorOsteoporotic10yPct = parseOptionalNumberLoose(frax?.majorOsteoporotic10yPct ?? frax?.majorFractureRisk10yPct);
+  const hip10yPct = parseOptionalNumberLoose(frax?.hip10yPct ?? frax?.hipFractureRisk10yPct);
+  const fallsCountPastYear = parseOptionalIntegerLoose(falls?.fallsCountPastYear ?? falls?.fallsCount ?? falls?.numberOfFalls);
+  const fratScore = parseOptionalNumberLoose(falls?.fratScore ?? falls?.frat ?? falls?.fratTotalScore);
+  const bergBalanceScore = parseOptionalNumberLoose(falls?.bergBalanceScore ?? falls?.bergScore ?? falls?.bergsBalanceScore);
+  const clinicalFrailtyScore = parseOptionalNumberLoose(
+    frailty?.clinicalFrailtyScore ?? frailty?.cfs ?? frailty?.clinicalFrailtyScale
+  );
+  const miniCogScore = parseOptionalNumberLoose(cognition?.miniCogScore ?? cognition?.miniCog);
+  const mocaScore = parseOptionalNumberLoose(cognition?.mocaScore ?? cognition?.moca);
+  const fallsInPastYearRaw = typeof falls?.fallsInPastYear === "string" ? falls.fallsInPastYear.trim().toLowerCase() : "";
+  const fallsInPastYear =
+    fallsInPastYearRaw === "yes" || fallsInPastYearRaw === "y" || fallsInPastYearRaw === "true" || fallsInPastYearRaw === "1"
+      ? "yes"
+      : fallsInPastYearRaw === "no" || fallsInPastYearRaw === "n" || fallsInPastYearRaw === "false" || fallsInPastYearRaw === "0"
+        ? "no"
+        : "";
+
+  const normalized = {
+    dexa: {
+      femoralNeckBmdGcm2: Number.isFinite(femoralNeckBmdGcm2) ? femoralNeckBmdGcm2 : null,
+      femoralNeckTScore: Number.isFinite(femoralNeckTScore) ? femoralNeckTScore : null,
+      totalHipTScore: Number.isFinite(totalHipTScore) ? totalHipTScore : null,
+      lumbarSpineTScore: Number.isFinite(lumbarSpineTScore) ? lumbarSpineTScore : null,
+      impression: typeof dexa?.impression === "string" ? dexa.impression : ""
+    },
+    audiogram: {
+      summary: typeof audiogram?.summary === "string" ? audiogram.summary : ""
+    },
+    frax: {
+      country: typeof frax?.country === "string" ? frax.country : "",
+      majorOsteoporotic10yPct: Number.isFinite(majorOsteoporotic10yPct) ? majorOsteoporotic10yPct : null,
+      hip10yPct: Number.isFinite(hip10yPct) ? hip10yPct : null
+    },
+    falls: {
+      fallsInPastYear,
+      fallsCountPastYear: Number.isFinite(fallsCountPastYear) ? fallsCountPastYear : null,
+      fratScore: Number.isFinite(fratScore) ? fratScore : null,
+      bergBalanceScore: Number.isFinite(bergBalanceScore) ? bergBalanceScore : null,
+      hcpaSummary: typeof falls?.hcpaSummary === "string" ? falls.hcpaSummary : ""
+    },
+    frailty: {
+      clinicalFrailtyScore: Number.isFinite(clinicalFrailtyScore) ? clinicalFrailtyScore : null
+    },
+    cognition: {
+      miniCogScore: Number.isFinite(miniCogScore) ? miniCogScore : null,
+      mocaScore: Number.isFinite(mocaScore) ? mocaScore : null
+    },
+    notes: Array.isArray(root?.notes) ? root.notes : []
+  };
+
+  payload.boneHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateAdultVaccinationWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildAdultVaccinationUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = ADULT_VACCINATION_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root =
+    payload?.adultVaccination && typeof payload.adultVaccination === "object"
+      ? payload.adultVaccination
+      : payload?.vaccination && typeof payload.vaccination === "object"
+        ? payload.vaccination
+        : payload;
+
+  const normalizeYesNo = (v) => {
+    if (v === true) return "yes";
+    if (v === false) return "no";
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (!s) return "";
+    if (s === "yes" || s === "y" || s === "true" || s === "1") return "yes";
+    if (s === "no" || s === "n" || s === "false" || s === "0") return "no";
+    return "";
+  };
+
+  const normalizeRiskFactor = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (!s) return "";
+    if (s === "diabetes") return "diabetes";
+    if (s === "ckd" || s.includes("kidney")) return "ckd";
+    if (s === "smokers" || s === "smoker" || s.includes("smok")) return "smokers";
+    if (s.includes("alcohol")) return "alcohol_use_disorder";
+    if (s.includes("immuno")) return "immunocompromised";
+    if (s === "hiv") return "hiv";
+    if (s.includes("cancer") || s.includes("malignan")) return "cancer";
+    if (s.includes("asplenia") || s.includes("splen")) return "asplenia";
+    if (s.includes("cochlear")) return "cochlear_implant";
+    if (s.includes("csf")) return "csf_leak";
+    if (s.includes("copd") || s.includes("asthma") || s.includes("chronic lung")) return "chronic_lung_disease";
+    if (s.includes("chronic heart") || s.includes("cardiac") || s.includes("heart disease")) return "chronic_heart_disease";
+    if (s.includes("chronic liver") || s.includes("cirrhos") || s.includes("hepatitis") || s.includes("liver disease"))
+      return "chronic_liver_disease";
+    if (s.includes("healthcare") || s.includes("health care") || s.includes("hcw")) return "healthcare_workers";
+    if (s.includes("high-risk") || s.includes("high risk")) return "high_risk_individuals";
+    return "";
+  };
+
+  const normalizePrevnar = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (!s) return "prevnar_20";
+    if (s.includes("prevnar") || s.includes("prevenar")) {
+      if (s.includes("20")) return "prevnar_20";
+      return "prevnar_20";
+    }
+    if (s === "prevnar_20") return "prevnar_20";
+    return "prevnar_20";
+  };
+
+  const riskFactorsRaw = Array.isArray(root?.riskFactors) ? root.riskFactors : Array.isArray(root?.riskFactor) ? root.riskFactor : [];
+  const riskFactors = Array.from(
+    new Set(
+      riskFactorsRaw
+        .map(normalizeRiskFactor)
+        .filter((x) => x)
+        .filter((x) => typeof x === "string")
+    )
+  );
+
+  const flu = root?.flu && typeof root.flu === "object" ? root.flu : {};
+  const pneumonia = root?.pneumonia && typeof root.pneumonia === "object" ? root.pneumonia : {};
+  const shingrix = root?.shingrix && typeof root.shingrix === "object" ? root.shingrix : {};
+  const hepatitisB = root?.hepatitisB && typeof root.hepatitisB === "object" ? root.hepatitisB : {};
+  const hepatitisA = root?.hepatitisA && typeof root.hepatitisA === "object" ? root.hepatitisA : {};
+  const cervicalCancer = root?.cervicalCancer && typeof root.cervicalCancer === "object" ? root.cervicalCancer : {};
+
+  const normalized = {
+    riskFactors,
+    flu: { planned: normalizeYesNo(flu?.planned ?? flu?.recommended) },
+    pneumonia: {
+      planned: normalizeYesNo(pneumonia?.planned ?? pneumonia?.recommended),
+      vaccine: normalizePrevnar(pneumonia?.vaccine ?? pneumonia?.brand ?? pneumonia?.name)
+    },
+    shingrix: {
+      planned: normalizeYesNo(shingrix?.planned ?? shingrix?.recommended),
+      dose1: typeof shingrix?.dose1 === "string" ? shingrix.dose1 : "",
+      dose2: typeof shingrix?.dose2 === "string" ? shingrix.dose2 : ""
+    },
+    hepatitisB: {
+      planned: normalizeYesNo(hepatitisB?.planned ?? hepatitisB?.recommended),
+      schedule: typeof hepatitisB?.schedule === "string" ? hepatitisB.schedule : ""
+    },
+    hepatitisA: { planned: normalizeYesNo(hepatitisA?.planned ?? hepatitisA?.recommended) },
+    cervicalCancer: { planned: normalizeYesNo(cervicalCancer?.planned ?? cervicalCancer?.recommended) },
+    notes: Array.isArray(root?.notes) ? root.notes : []
+  };
+
+  payload.adultVaccination = normalized;
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -5272,6 +5724,33 @@ gptRouter.post(
 );
 
 gptRouter.post(
+  "/women-health",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createWomenHealthHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/bone-health",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createBoneHealthHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/adult-vaccination",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createAdultVaccinationHandler(getGptControllerContext)
+);
+
+gptRouter.post(
   "/docs-tests",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -5358,6 +5837,12 @@ function getGptControllerContext() {
     generateKidneyHealthWithAi,
     normalizeDiabetesRiskIncoming,
     generateDiabetesRiskWithAi,
+    normalizeWomenHealthIncoming,
+    generateWomenHealthWithAi,
+    normalizeBoneHealthIncoming,
+    generateBoneHealthWithAi,
+    normalizeAdultVaccinationIncoming,
+    generateAdultVaccinationWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
