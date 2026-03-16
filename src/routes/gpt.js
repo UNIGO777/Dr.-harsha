@@ -39,6 +39,7 @@ import { createAdultVaccinationHandler } from "../Controllers/AdultVaccinationCo
 import { createCancerScreeningHandler } from "../Controllers/CancerScreeningController.js";
 import { createGenesHealthHandler } from "../Controllers/GenesHealthController.js";
 import { createAllergyPanelsHandler } from "../Controllers/AllergyPanelsController.js";
+import { createBrainHealthAssessmentHandler } from "../Controllers/BrainHealthAssessmentController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -95,6 +96,10 @@ import {
 } from "../AiPrompts/cancerScreeningPrompts.js";
 import { GENES_HEALTH_SYSTEM_PROMPT, buildGenesHealthUserPrompt } from "../AiPrompts/genesHealthPrompts.js";
 import { ALLERGY_PANELS_SYSTEM_PROMPT, buildAllergyPanelsUserPrompt } from "../AiPrompts/allergyPanelsPrompts.js";
+import {
+  BRAIN_HEALTH_ASSESSMENT_SYSTEM_PROMPT,
+  buildBrainHealthAssessmentUserPrompt
+} from "../AiPrompts/brainHealthAssessmentPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -616,6 +621,111 @@ function normalizeDietAssessmentIncoming(body) {
   return { patient: normPatient, assessment: normAssessment };
 }
 
+function normalizeSocialFitnessIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const patient = b.patient && typeof b.patient === "object" ? b.patient : {};
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : b;
+
+  const sex =
+    typeof patient.sex === "string"
+      ? patient.sex.trim().toLowerCase()
+      : typeof assessment.sex === "string"
+        ? assessment.sex.trim().toLowerCase()
+        : "";
+  const age = parseOptionalIntegerLoose(patient.age ?? assessment.age);
+
+  const normPatient = {
+    name: typeof patient.name === "string" ? patient.name.trim() : "",
+    sex: sex === "male" || sex === "female" ? sex : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+
+  const score = (v) => {
+    if (typeof v === "number" && Number.isFinite(v)) return v === 0 || v === 1 || v === 2 ? v : null;
+    if (typeof v !== "string") return null;
+    const s = v.trim();
+    if (!s) return null;
+    const n = parseMaybeNumber(s);
+    if (Number.isFinite(n) && (n === 0 || n === 1 || n === 2)) return n;
+    const lower = s.toLowerCase();
+    if (lower === "yes" || lower === "strong") return 2;
+    if (lower === "some") return 1;
+    if (lower === "no" || lower === "none") return 0;
+    return null;
+  };
+
+  const normAssessment = {
+    safetySecurity: score(assessment.safetySecurity),
+    learningGrowth: score(assessment.learningGrowth),
+    emotionalConfiding: score(assessment.emotionalConfiding),
+    identityAffirmation: score(assessment.identityAffirmation),
+    romanticIntimacy: score(assessment.romanticIntimacy),
+    practicalHelp: score(assessment.practicalHelp),
+    funRelaxation: score(assessment.funRelaxation)
+  };
+
+  return { patient: normPatient, assessment: normAssessment };
+}
+
+function computeSocialFitness({ assessment }) {
+  const a = assessment && typeof assessment === "object" ? assessment : {};
+  const keys = [
+    "safetySecurity",
+    "learningGrowth",
+    "emotionalConfiding",
+    "identityAffirmation",
+    "romanticIntimacy",
+    "practicalHelp",
+    "funRelaxation"
+  ];
+
+  let total = 0;
+  let answeredCount = 0;
+  for (const k of keys) {
+    const n = a[k];
+    if (typeof n !== "number" || !Number.isFinite(n)) continue;
+    answeredCount += 1;
+    total += n;
+  }
+  const missingCount = keys.length - answeredCount;
+
+  if (answeredCount === 0) {
+    return { totalScore: null, interpretation: "", preventiveRisk: "", answeredCount, missingCount };
+  }
+
+  if (total >= 12) {
+    return { totalScore: total, interpretation: "Excellent social health", preventiveRisk: "Protective", answeredCount, missingCount };
+  }
+  if (total >= 9) {
+    return { totalScore: total, interpretation: "Good support", preventiveRisk: "Mild risk", answeredCount, missingCount };
+  }
+  if (total >= 6) {
+    return {
+      totalScore: total,
+      interpretation: "Moderate social isolation",
+      preventiveRisk: "Increased health risk",
+      answeredCount,
+      missingCount
+    };
+  }
+  if (total >= 3) {
+    return {
+      totalScore: total,
+      interpretation: "High social isolation",
+      preventiveRisk: "High risk for depression, dementia",
+      answeredCount,
+      missingCount
+    };
+  }
+  return {
+    totalScore: total,
+    interpretation: "Severe social disconnection",
+    preventiveRisk: "Very high health risk",
+    answeredCount,
+    missingCount
+  };
+}
+
 function computeDietAssessment({ assessment }) {
   const a = assessment && typeof assessment === "object" ? assessment : {};
   const rule5 = [
@@ -917,6 +1027,18 @@ function normalizeGenesHealthIncoming(body) {
 }
 
 function normalizeAllergyPanelsIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+  return { patient };
+}
+
+function normalizeBrainHealthAssessmentIncoming(body) {
   const b = body && typeof body === "object" ? body : {};
   const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
   const age = parseOptionalIntegerLoose(b.age);
@@ -2665,6 +2787,124 @@ async function generateGenesHealthWithAi({ openai, provider, patient, extractedT
   };
 
   payload.genesHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateBrainHealthAssessmentWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildBrainHealthAssessmentUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = BRAIN_HEALTH_ASSESSMENT_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+
+  const root =
+    payload?.brainHealthAssessment && typeof payload.brainHealthAssessment === "object"
+      ? payload.brainHealthAssessment
+      : payload;
+
+  const toStringOrEmpty = (v) => {
+    if (v == null) return "";
+    if (typeof v === "string") return v;
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    return "";
+  };
+
+  const normalizeCarotidFindings = (o) => {
+    const f = o && typeof o === "object" ? o : {};
+    return {
+      cimt: toStringOrEmpty(f.cimt),
+      plaque: toStringOrEmpty(f.plaque),
+      stenosis: toStringOrEmpty(f.stenosis)
+    };
+  };
+
+  const normalizeMriFindings = (o) => {
+    const f = o && typeof o === "object" ? o : {};
+    return {
+      whiteMatterHyperintensities: toStringOrEmpty(f.whiteMatterHyperintensities),
+      silentInfarcts: toStringOrEmpty(f.silentInfarcts),
+      brainAtrophy: toStringOrEmpty(f.brainAtrophy)
+    };
+  };
+
+  const carotid = root?.carotidDoppler && typeof root.carotidDoppler === "object" ? root.carotidDoppler : {};
+  const mri = root?.mriBrain && typeof root.mriBrain === "object" ? root.mriBrain : {};
+  const genetic = root?.geneticTesting && typeof root.geneticTesting === "object" ? root.geneticTesting : {};
+
+  const normalized = {
+    carotidDoppler: {
+      category: toStringOrEmpty(carotid.category),
+      reportedAt: toStringOrEmpty(carotid.reportedAt),
+      summary: toStringOrEmpty(carotid.summary),
+      findings: normalizeCarotidFindings(carotid.findings)
+    },
+    mriBrain: {
+      category: toStringOrEmpty(mri.category),
+      reportedAt: toStringOrEmpty(mri.reportedAt),
+      summary: toStringOrEmpty(mri.summary),
+      findings: normalizeMriFindings(mri.findings)
+    },
+    geneticTesting: {
+      apoe: toStringOrEmpty(genetic.apoe),
+      lrrk2: toStringOrEmpty(genetic.lrrk2)
+    },
+    notes: Array.isArray(root?.notes) ? root.notes : []
+  };
+
+  payload.brainHealthAssessment = normalized;
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -6105,6 +6345,16 @@ gptRouter.post("/exercise-assessment", upload.none(), createExerciseAssessmentHa
 
 gptRouter.post("/diet-assessment", upload.none(), createDietAssessmentHandler(getGptControllerContext));
 
+gptRouter.post("/social-fitness", upload.none(), (req, res) => {
+  try {
+    const normalized = normalizeSocialFitnessIncoming(req?.body);
+    const computed = computeSocialFitness(normalized);
+    res.json({ patient: normalized.patient, assessment: normalized.assessment, computed });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate social fitness" });
+  }
+});
+
 gptRouter.post(
   "/ans-assessment",
   upload.fields([
@@ -6223,6 +6473,15 @@ gptRouter.post(
 );
 
 gptRouter.post(
+  "/brain-health-assessment",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createBrainHealthAssessmentHandler(getGptControllerContext)
+);
+
+gptRouter.post(
   "/docs-tests",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -6321,6 +6580,8 @@ function getGptControllerContext() {
     generateGenesHealthWithAi,
     normalizeAllergyPanelsIncoming,
     generateAllergyPanelsWithAi,
+    normalizeBrainHealthAssessmentIncoming,
+    generateBrainHealthAssessmentWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
