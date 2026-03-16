@@ -98,7 +98,9 @@ import { GENES_HEALTH_SYSTEM_PROMPT, buildGenesHealthUserPrompt } from "../AiPro
 import { ALLERGY_PANELS_SYSTEM_PROMPT, buildAllergyPanelsUserPrompt } from "../AiPrompts/allergyPanelsPrompts.js";
 import {
   BRAIN_HEALTH_ASSESSMENT_SYSTEM_PROMPT,
-  buildBrainHealthAssessmentUserPrompt
+  BRAIN_HEALTH_PART2_EXTRACT_SYSTEM_PROMPT,
+  buildBrainHealthAssessmentUserPrompt,
+  buildBrainHealthPart2ExtractUserPrompt
 } from "../AiPrompts/brainHealthAssessmentPrompts.js";
 
 function requireString(value) {
@@ -1573,6 +1575,79 @@ function normalizeBrainHealthPart2Incoming(body) {
   return { patient: normPatient, assessment: normAssessment };
 }
 
+function normalizeBrainHealthPart2ExtractPayload(payload) {
+  const root = payload && typeof payload === "object" ? payload : {};
+  const mri = root?.mriDamage && typeof root.mriDamage === "object" ? root.mriDamage : {};
+
+  const toString = (v) => (typeof v === "string" ? v.trim() : v == null ? "" : String(v).trim());
+
+  const fazekasGrade = (() => {
+    const raw = toString(mri.fazekasGrade).toLowerCase();
+    if (!raw) return "";
+    if (raw === "0" || raw === "1" || raw === "2" || raw === "3") return raw;
+    if (raw === "i") return "1";
+    if (raw === "ii") return "2";
+    if (raw === "iii") return "3";
+    const n = parseOptionalIntegerLoose(raw);
+    if (!Number.isFinite(n)) return "";
+    const clamped = Math.max(0, Math.min(3, Math.trunc(n)));
+    return String(clamped);
+  })();
+
+  const atrophySeverity = (() => {
+    const raw = toString(mri.atrophySeverity).toLowerCase().replace(/\s+/g, "_");
+    if (!raw) return "";
+    if (raw === "none" || raw === "normal" || raw === "no" || raw === "absent") return "none";
+    if (raw === "mild") return "mild";
+    if (raw === "moderate_severe" || raw === "moderate-to-severe" || raw === "moderate-severe") return "moderate_severe";
+    if (raw === "moderate" || raw === "severe" || raw.includes("moderate") || raw.includes("severe")) return "moderate_severe";
+    return "";
+  })();
+
+  const silentInfarcts = (() => {
+    const raw = toString(mri.silentInfarcts).toLowerCase();
+    if (!raw) return "";
+    if (raw === "none" || raw === "no" || raw === "absent" || raw === "nil") return "none";
+    if (raw === "single" || raw === "one") return "single";
+    if (raw === "multiple" || raw === "many") return "multiple";
+    return "";
+  })();
+
+  const microbleeds = (() => {
+    const raw = toString(mri.microbleeds).toLowerCase().replace(/\s+/g, "");
+    if (!raw) return "";
+    if (raw === "none" || raw === "no" || raw === "absent" || raw === "nil") return "none";
+    if (raw === "1-2" || raw === "1–2" || raw === "1to2" || raw === "1-2microbleeds") return "1-2";
+    if (raw === "ge3" || raw === ">=3" || raw === "≥3" || raw === "3+" || raw === "morethan3") return "ge3";
+    const n = parseOptionalIntegerLoose(raw);
+    if (!Number.isFinite(n)) return "";
+    if (n <= 0) return "none";
+    if (n <= 2) return "1-2";
+    return "ge3";
+  })();
+
+  const intracranialDisease = (() => {
+    const raw = toString(mri.intracranialDisease).toLowerCase();
+    if (!raw) return "";
+    if (raw === "yes" || raw === "present" || raw === "positive") return "yes";
+    if (raw === "no" || raw === "none" || raw === "absent" || raw === "negative") return "no";
+    return "";
+  })();
+
+  const notes = Array.isArray(root.notes) ? root.notes.map((x) => toString(x)).filter(Boolean) : [];
+
+  return {
+    mriDamage: {
+      fazekasGrade,
+      atrophySeverity,
+      silentInfarcts,
+      microbleeds,
+      intracranialDisease
+    },
+    notes
+  };
+}
+
 function computeBrainHealthPart2({ patient, assessment }) {
   const p = patient && typeof patient === "object" ? patient : {};
   const a = assessment && typeof assessment === "object" ? assessment : {};
@@ -1704,6 +1779,158 @@ function computeBrainHealthPart2({ patient, assessment }) {
     mocaAdjustmentYears: moca == null ? null : mocaAdjustmentYears,
     formula: "Brain Age = Age + (MRI × 1.5) + (Vascular × 0.8) − (Lifestyle × 0.5) + MoCA adj."
   };
+}
+
+async function generateBrainHealthPart2ExtractWithAi({ openai, provider, patient, extractedText, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 30000) : "";
+  const userPrompt = buildBrainHealthPart2ExtractUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = BRAIN_HEALTH_PART2_EXTRACT_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: [{ type: "text", text: userPrompt }] }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: [{ type: "text", text: userPrompt }] }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed =
+    safeParseJsonObject(raw) ??
+    safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ??
+    null;
+
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+function heuristicExtractBrainHealthPart2FromText(extractedText) {
+  const text = typeof extractedText === "string" ? extractedText : "";
+  const s = text.replace(/\r/g, "\n");
+  const upper = s.toUpperCase();
+
+  const notes = [];
+  const mriDamage = {
+    fazekasGrade: "",
+    atrophySeverity: "",
+    silentInfarcts: "",
+    microbleeds: "",
+    intracranialDisease: ""
+  };
+
+  const matchOne = (re) => {
+    const m = re.exec(s);
+    return m ? m : null;
+  };
+
+  const fazekas = (() => {
+    const m =
+      matchOne(/\bFAZEKAS(?:\s*(?:GRADE|SCORE))?\s*[:\-]?\s*(0|1|2|3)\b/i) ||
+      matchOne(/\bFAZEKAS(?:\s*(?:GRADE|SCORE))?\s*[:\-]?\s*(I{1,3})\b/i);
+    if (!m) return "";
+    const raw = String(m[1] || "").trim().toLowerCase();
+    if (raw === "i") return "1";
+    if (raw === "ii") return "2";
+    if (raw === "iii") return "3";
+    if (raw === "0" || raw === "1" || raw === "2" || raw === "3") return raw;
+    return "";
+  })();
+  if (fazekas) mriDamage.fazekasGrade = fazekas;
+
+  const atrophy = (() => {
+    const m = matchOne(/\bATROPHY\b[\s\S]{0,80}\b(NONE|NORMAL|ABSENT|MILD|MODERATE(?:\s*[-–]\s*SEVERE)?|SEVERE)\b/i);
+    if (!m) return "";
+    const raw = String(m[1] || "").trim().toLowerCase();
+    if (raw === "none" || raw === "normal" || raw === "absent") return "none";
+    if (raw === "mild") return "mild";
+    if (raw.includes("moderate") || raw.includes("severe")) return "moderate_severe";
+    return "";
+  })();
+  if (atrophy) mriDamage.atrophySeverity = atrophy;
+
+  const silentInfarcts = (() => {
+    const m =
+      matchOne(/\bSILENT\s+INFARCTS?\b[\s\S]{0,80}\b(NONE|NO|ABSENT|NIL|SINGLE|MULTIPLE)\b/i) ||
+      matchOne(/\bLACUNAR\s+INFARCTS?\b[\s\S]{0,80}\b(NONE|NO|ABSENT|NIL|SINGLE|MULTIPLE)\b/i);
+    if (!m) return "";
+    const raw = String(m[1] || "").trim().toLowerCase();
+    if (raw === "none" || raw === "no" || raw === "absent" || raw === "nil") return "none";
+    if (raw === "single") return "single";
+    if (raw === "multiple") return "multiple";
+    return "";
+  })();
+  if (silentInfarcts) mriDamage.silentInfarcts = silentInfarcts;
+
+  const microbleeds = (() => {
+    const m =
+      matchOne(/\bMICROBLEEDS?\b[\s\S]{0,80}\b(NONE|NO|ABSENT|NIL|(\d+)\s*[-–]\s*(\d+)|(\d+)\+|(\d+))\b/i) ||
+      matchOne(/\bCEREBRAL\s+MICROBLEEDS?\b[\s\S]{0,80}\b(NONE|NO|ABSENT|NIL|(\d+)\s*[-–]\s*(\d+)|(\d+)\+|(\d+))\b/i);
+    if (!m) return "";
+    const raw = String(m[1] || "").trim().toLowerCase();
+    if (raw === "none" || raw === "no" || raw === "absent" || raw === "nil") return "none";
+    const rangeStart = m[2] ? parseOptionalIntegerLoose(m[2]) : null;
+    const rangeEnd = m[3] ? parseOptionalIntegerLoose(m[3]) : null;
+    if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)) {
+      if (rangeEnd <= 0) return "none";
+      if (rangeEnd <= 2) return "1-2";
+      return "ge3";
+    }
+    const plusN = m[4] ? parseOptionalIntegerLoose(m[4]) : null;
+    if (Number.isFinite(plusN)) return plusN <= 2 ? "1-2" : "ge3";
+    const singleN = m[5] ? parseOptionalIntegerLoose(m[5]) : null;
+    if (Number.isFinite(singleN)) return singleN <= 0 ? "none" : singleN <= 2 ? "1-2" : "ge3";
+    return "";
+  })();
+  if (microbleeds) mriDamage.microbleeds = microbleeds;
+
+  const intracranialDisease = (() => {
+    const hasIntracranial = upper.includes("INTRACRANIAL");
+    const hasStenosis = upper.includes("STENOSIS");
+    const hasCalc = upper.includes("CALCIFICATION") || upper.includes("CALCIFIED");
+    if (!hasIntracranial && !hasStenosis && !hasCalc) return "";
+    const mNo = matchOne(/\b(NO|ABSENT|WITHOUT)\b[\s\S]{0,40}\b(INTRACRANIAL\s+STENOSIS|INTRACRANIAL\s+CALCIFICATION|STENOSIS|CALCIFICATION)\b/i);
+    if (mNo) return "no";
+    const mYes = matchOne(/\b(INTRACRANIAL\s+STENOSIS|INTRACRANIAL\s+CALCIFICATION|STENOSIS|CALCIFICATION)\b[\s\S]{0,40}\b(PRESENT|SEEN|YES|NOTED)\b/i);
+    if (mYes) return "yes";
+    return "";
+  })();
+  if (intracranialDisease) mriDamage.intracranialDisease = intracranialDisease;
+
+  if (!mriDamage.fazekasGrade && upper.includes("WHITE MATTER") && upper.includes("HYPERINTENS")) {
+    notes.push("White matter hyperintensities mentioned; Fazekas grade not explicit")
+  }
+  if (!mriDamage.atrophySeverity && upper.includes("ATROPHY")) {
+    notes.push("Atrophy mentioned; severity not explicit")
+  }
+
+  return { mriDamage, notes };
 }
 
 function computeDietAssessment({ assessment }) {
@@ -4075,12 +4302,24 @@ function isImageMime(mime) {
   );
 }
 
-function isPdfMime(mime) {
-  return mime === "application/pdf";
+function isPdfMime(input) {
+  const mime = typeof input === "string" ? input : input?.mimetype;
+  if (mime === "application/pdf") return true;
+  if (mime === "application/octet-stream") {
+    const name = typeof input?.originalname === "string" ? input.originalname.toLowerCase() : "";
+    return name.endsWith(".pdf");
+  }
+  return false;
 }
 
-function isDocxMime(mime) {
-  return mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+function isDocxMime(input) {
+  const mime = typeof input === "string" ? input : input?.mimetype;
+  if (mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") return true;
+  if (mime === "application/octet-stream") {
+    const name = typeof input?.originalname === "string" ? input.originalname.toLowerCase() : "";
+    return name.endsWith(".docx");
+  }
+  return false;
 }
 
 function collectUploadedFiles(req) {
@@ -4179,6 +4418,22 @@ async function extractDocxTextForPrompt(docxFiles) {
       "Urinary Glucose"
     ]);
     if (!capped) continue;
+    const next = `\n\n[DOCX: ${f.originalname}]\n${capped}`;
+    extractedText = (extractedText + next).slice(0, maxDocxTextChars);
+  }
+  return extractedText;
+}
+
+async function extractDocxTextRawForPrompt(docxFiles) {
+  const maxDocxTextChars = 80000;
+  let extractedText = "";
+  for (const f of Array.isArray(docxFiles) ? docxFiles : []) {
+    if (extractedText.length >= maxDocxTextChars) break;
+    const result = await mammoth.extractRawText({ buffer: f.buffer });
+    const extracted = typeof result?.value === "string" ? result.value : "";
+    const trimmed = extracted.trim();
+    if (!trimmed) continue;
+    const capped = trimmed.length > 20000 ? trimmed.slice(0, 20000) : trimmed;
     const next = `\n\n[DOCX: ${f.originalname}]\n${capped}`;
     extractedText = (extractedText + next).slice(0, maxDocxTextChars);
   }
@@ -7364,6 +7619,73 @@ gptRouter.post("/brain-health-part2", upload.none(), (req, res) => {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate brain age" });
   }
 });
+
+gptRouter.post(
+  "/brain-health-part2-extract",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+    try {
+      const provider = getAiProviderFromReq(req);
+      const openai = getOpenAIClient();
+
+      const patient = (() => {
+        const raw = req?.body?.patientJson;
+        const parsed = requireString(raw) ? safeParseJsonObjectLoose(raw) : null;
+        const obj = parsed && typeof parsed === "object" ? parsed : {};
+        const name = typeof obj.name === "string" ? obj.name.trim() : typeof req?.body?.name === "string" ? req.body.name.trim() : "";
+        const sex = typeof obj.sex === "string" ? obj.sex.trim().toLowerCase() : typeof req?.body?.sex === "string" ? req.body.sex.trim().toLowerCase() : "";
+        const age = parseOptionalIntegerLoose(obj.age ?? req?.body?.age);
+        return {
+          name,
+          sex: sex === "male" || sex === "female" ? sex : "",
+          age: Number.isFinite(age) && age > 0 ? age : null
+        };
+      })();
+
+      const uploaded = collectUploadedFiles(req);
+      const pdfFiles = uploaded.filter((f) => f && isPdfMime(f));
+      const docxFiles = uploaded.filter((f) => f && isDocxMime(f));
+      if (pdfFiles.length === 0 && docxFiles.length === 0) {
+        return res.status(400).json({ error: "Please upload a PDF or DOCX report." });
+      }
+
+      const pdfText = pdfFiles.length > 0 ? await extractPdfTextRawForPrompt(pdfFiles) : "";
+      const docxText = docxFiles.length > 0 ? await extractDocxTextRawForPrompt(docxFiles) : "";
+      const extractedText = `${docxText}${pdfText}`.trim();
+
+      const debug = String(req?.body?.debug || "").toLowerCase() === "true";
+      const resolvedProvider = normalizeAiProvider(provider);
+      const canUseAi =
+        (resolvedProvider === "openai" && !!openai) ||
+        (resolvedProvider === "claude" && hasAnthropicKey()) ||
+        (resolvedProvider === "gemini" && hasGeminiKey());
+
+      const payload = canUseAi
+        ? await generateBrainHealthPart2ExtractWithAi({
+            openai,
+            provider,
+            patient,
+            extractedText,
+            debug
+          })
+        : (() => {
+            const heur = heuristicExtractBrainHealthPart2FromText(extractedText);
+            const note = resolvedProvider
+              ? `Heuristic extraction used (AI provider '${resolvedProvider}' not configured)`
+              : "Heuristic extraction used (AI provider not configured)";
+            return { ...heur, notes: [...(Array.isArray(heur.notes) ? heur.notes : []), note] };
+          })();
+
+      const extracted = normalizeBrainHealthPart2ExtractPayload(payload);
+      res.json({ extracted });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to extract MRI findings" });
+    }
+  }
+);
 
 gptRouter.post(
   "/ans-assessment",
