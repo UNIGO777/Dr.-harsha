@@ -726,6 +726,986 @@ function computeSocialFitness({ assessment }) {
   };
 }
 
+function normalizeHeartHealthScoreIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const patient = b.patient && typeof b.patient === "object" ? b.patient : {};
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : b;
+  const lifestyle = assessment?.lifestyle && typeof assessment.lifestyle === "object" ? assessment.lifestyle : {};
+  const biomarkers = assessment?.biomarkers && typeof assessment.biomarkers === "object" ? assessment.biomarkers : {};
+  const ecg = assessment?.ecg && typeof assessment.ecg === "object" ? assessment.ecg : {};
+  const echo = assessment?.echo && typeof assessment.echo === "object" ? assessment.echo : {};
+  const vascular = assessment?.vascular && typeof assessment.vascular === "object" ? assessment.vascular : {};
+
+  const sex =
+    typeof patient.sex === "string"
+      ? patient.sex.trim().toLowerCase()
+      : typeof assessment.sex === "string"
+        ? assessment.sex.trim().toLowerCase()
+        : "";
+  const age = parseOptionalIntegerLoose(patient.age ?? assessment.age);
+
+  const normPatient = {
+    name: typeof patient.name === "string" ? patient.name.trim() : "",
+    sex: sex === "male" || sex === "female" ? sex : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+
+  const yesNo = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (!s) return "";
+    if (s === "yes" || s === "y" || s === "true" || s === "1") return "yes";
+    if (s === "no" || s === "n" || s === "false" || s === "0") return "no";
+    return "";
+  };
+
+  const severity = (v, allowed) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    return allowed.includes(s) ? s : "";
+  };
+
+  const n = (v) => parseOptionalNumberLoose(v);
+
+  const normAssessment = {
+    lifestyle: {
+      smoking: yesNo(lifestyle.smoking),
+      bmi: n(lifestyle.bmi),
+      weeklyPhysicalActivityMin: n(lifestyle.weeklyPhysicalActivityMin),
+      diabetes: yesNo(lifestyle.diabetes),
+      hba1c: n(lifestyle.hba1c),
+      sleepApneaUntreated: yesNo(lifestyle.sleepApneaUntreated),
+      fattyLiver: yesNo(lifestyle.fattyLiver),
+      systolicBp: n(lifestyle.systolicBp),
+      diastolicBp: n(lifestyle.diastolicBp),
+      depressionAnxietySeverity: severity(lifestyle.depressionAnxietySeverity, ["none", "mild", "moderate", "severe"]),
+      socialHealthSeverity: severity(lifestyle.socialHealthSeverity, ["good", "mild", "moderate", "severe"])
+    },
+    biomarkers: {
+      ldl: n(biomarkers.ldl),
+      nonHdl: n(biomarkers.nonHdl),
+      apoB: n(biomarkers.apoB),
+      lpa: n(biomarkers.lpa),
+      triglycerides: n(biomarkers.triglycerides),
+      hsCrp: n(biomarkers.hsCrp),
+      uricAcid: n(biomarkers.uricAcid)
+    },
+    ecg: {
+      atrialFibrillation: yesNo(ecg.atrialFibrillation),
+      lvh: yesNo(ecg.lvh),
+      stDepressionOrTInversion: yesNo(ecg.stDepressionOrTInversion),
+      qtProlongation: yesNo(ecg.qtProlongation),
+      bundleBranchBlock: yesNo(ecg.bundleBranchBlock),
+      pathologicalQWaves: yesNo(ecg.pathologicalQWaves)
+    },
+    echo: {
+      lvHypertrophy: yesNo(echo.lvHypertrophy),
+      ef: n(echo.ef),
+      leftAtrialEnlargement: yesNo(echo.leftAtrialEnlargement),
+      diastolicDysfunctionGrade: n(echo.diastolicDysfunctionGrade),
+      pulmonaryPressure: n(echo.pulmonaryPressure),
+      wallMotionAbnormality: yesNo(echo.wallMotionAbnormality)
+    },
+    vascular: {
+      cacScore: n(vascular.cacScore),
+      carotidPlaque: yesNo(vascular.carotidPlaque),
+      abi: n(vascular.abi)
+    }
+  };
+
+  return { patient: normPatient, assessment: normAssessment };
+}
+
+function computeHeartHealthScore({ assessment }) {
+  const a = assessment && typeof assessment === "object" ? assessment : {};
+  const lifestyle = a?.lifestyle && typeof a.lifestyle === "object" ? a.lifestyle : {};
+  const biomarkers = a?.biomarkers && typeof a.biomarkers === "object" ? a.biomarkers : {};
+  const ecg = a?.ecg && typeof a.ecg === "object" ? a.ecg : {};
+  const echo = a?.echo && typeof a.echo === "object" ? a.echo : {};
+  const vascular = a?.vascular && typeof a.vascular === "object" ? a.vascular : {};
+
+  const deductions = [];
+  const add = (key, label, points, active) => {
+    if (!active) return;
+    deductions.push({ key, label, points });
+  };
+
+  const yes = (v) => v === "yes";
+  const bmi = Number.isFinite(lifestyle.bmi) ? lifestyle.bmi : null;
+  const weeklyActivity = Number.isFinite(lifestyle.weeklyPhysicalActivityMin) ? lifestyle.weeklyPhysicalActivityMin : null;
+  const hba1c = Number.isFinite(lifestyle.hba1c) ? lifestyle.hba1c : null;
+  const sbp = Number.isFinite(lifestyle.systolicBp) ? lifestyle.systolicBp : null;
+  const dbp = Number.isFinite(lifestyle.diastolicBp) ? lifestyle.diastolicBp : null;
+  const pulsePressure = Number.isFinite(sbp) && Number.isFinite(dbp) ? sbp - dbp : null;
+
+  add("smoking", "Smoking", 8, yes(lifestyle.smoking));
+  add("bmi", "BMI ≥ 30", 5, Number.isFinite(bmi) && bmi >= 30);
+  add("physical_inactivity", "Physical inactivity (<150 min/week)", 4, Number.isFinite(weeklyActivity) && weeklyActivity < 150);
+  add(
+    "diabetes",
+    "Diabetes / HbA1c ≥ 6.5",
+    5,
+    yes(lifestyle.diabetes) || (Number.isFinite(hba1c) && hba1c >= 6.5)
+  );
+  add("sleep_apnea", "Sleep apnea (untreated)", 3, yes(lifestyle.sleepApneaUntreated));
+  add("fatty_liver", "Fatty liver", 3, yes(lifestyle.fattyLiver));
+  add("hypertension", "Hypertension (>140/90)", 4, (Number.isFinite(sbp) && sbp > 140) || (Number.isFinite(dbp) && dbp > 90));
+
+  add("depression_mild", "Depression/Anxiety (mild)", 1, lifestyle.depressionAnxietySeverity === "mild");
+  add("depression_moderate", "Depression/Anxiety (moderate)", 2, lifestyle.depressionAnxietySeverity === "moderate");
+  add("depression_severe", "Depression/Anxiety (severe)", 3, lifestyle.depressionAnxietySeverity === "severe");
+
+  add("social_mild", "Social health (mild)", 1, lifestyle.socialHealthSeverity === "mild");
+  add("social_moderate", "Social health (moderate)", 2, lifestyle.socialHealthSeverity === "moderate");
+  add("social_severe", "Social health (severe)", 3, lifestyle.socialHealthSeverity === "severe");
+
+  const ldl = Number.isFinite(biomarkers.ldl) ? biomarkers.ldl : null;
+  const nonHdl = Number.isFinite(biomarkers.nonHdl) ? biomarkers.nonHdl : null;
+  const apoB = Number.isFinite(biomarkers.apoB) ? biomarkers.apoB : null;
+  const lpa = Number.isFinite(biomarkers.lpa) ? biomarkers.lpa : null;
+  const tg = Number.isFinite(biomarkers.triglycerides) ? biomarkers.triglycerides : null;
+  const hsCrp = Number.isFinite(biomarkers.hsCrp) ? biomarkers.hsCrp : null;
+  const uric = Number.isFinite(biomarkers.uricAcid) ? biomarkers.uricAcid : null;
+
+  add("ldl", "LDL ≥ 160", 4, Number.isFinite(ldl) && ldl >= 160);
+  add("non_hdl", "Non-HDL ≥ 190", 3, Number.isFinite(nonHdl) && nonHdl >= 190);
+  add("apob", "ApoB ≥ 100", 4, Number.isFinite(apoB) && apoB >= 100);
+  add("lpa", "Lp(a) ≥ 50 mg/dL", 3, Number.isFinite(lpa) && lpa >= 50);
+  add("triglycerides", "Triglycerides ≥ 200", 2, Number.isFinite(tg) && tg >= 200);
+  add("hscrp", "hs-CRP ≥ 3", 2, Number.isFinite(hsCrp) && hsCrp >= 3);
+  add("uric_acid", "Uric acid > 8", 2, Number.isFinite(uric) && uric > 8);
+
+  add("ecg_af", "ECG: Atrial fibrillation", 3, yes(ecg.atrialFibrillation));
+  add("ecg_lvh", "ECG: LVH", 2, yes(ecg.lvh));
+  add("ecg_stt", "ECG: ST depression / T inversion", 2, yes(ecg.stDepressionOrTInversion));
+  add("ecg_qt", "ECG: QT prolongation", 1, yes(ecg.qtProlongation));
+  add("ecg_bbb", "ECG: Bundle branch block", 1, yes(ecg.bundleBranchBlock));
+  add("ecg_qwaves", "ECG: Pathological Q waves", 1, yes(ecg.pathologicalQWaves));
+
+  const ef = Number.isFinite(echo.ef) ? echo.ef : null;
+  const diaGrade = Number.isFinite(echo.diastolicDysfunctionGrade) ? echo.diastolicDysfunctionGrade : null;
+  const pap = Number.isFinite(echo.pulmonaryPressure) ? echo.pulmonaryPressure : null;
+
+  add("echo_lvh", "Echo: LV hypertrophy", 4, yes(echo.lvHypertrophy));
+  add("echo_ef", "Echo: EF < 50%", 4, Number.isFinite(ef) && ef < 50);
+  add("echo_la", "Echo: Left atrial enlargement", 3, yes(echo.leftAtrialEnlargement));
+  add("echo_diastolic", "Echo: Diastolic dysfunction grade ≥ 2", 3, Number.isFinite(diaGrade) && diaGrade >= 2);
+  add("echo_pap", "Echo: Pulmonary pressure > 35 mmHg", 3, Number.isFinite(pap) && pap > 35);
+  add("echo_wma", "Echo: Wall motion abnormality", 3, yes(echo.wallMotionAbnormality));
+
+  const cac = Number.isFinite(vascular.cacScore) ? vascular.cacScore : null;
+  const abi = Number.isFinite(vascular.abi) ? vascular.abi : null;
+  add("cac_1_99", "CAC 1–99", 3, Number.isFinite(cac) && cac >= 1 && cac <= 99);
+  add("cac_100_299", "CAC 100–299", 6, Number.isFinite(cac) && cac >= 100 && cac <= 299);
+  add("cac_300", "CAC ≥ 300", 10, Number.isFinite(cac) && cac >= 300);
+  add("carotid_plaque", "Carotid plaque", 5, yes(vascular.carotidPlaque));
+  add("abi", "ABI < 0.9", 4, Number.isFinite(abi) && abi < 0.9);
+  add("pulse_pressure", "Wide pulse pressure (>60)", 3, Number.isFinite(pulsePressure) && pulsePressure > 60);
+
+  const totalDeduction = deductions.reduce((sum, d) => sum + (Number.isFinite(d?.points) ? d.points : 0), 0);
+  const score = Math.max(0, Math.min(100, 100 - totalDeduction));
+  const meaning = score >= 80 ? "excellent" : score >= 60 ? "mild risk" : score >= 40 ? "moderate risk" : score >= 20 ? "high risk" : "very high risk";
+
+  return {
+    score,
+    totalDeduction,
+    meaning,
+    pulsePressure: Number.isFinite(pulsePressure) ? pulsePressure : null,
+    deductions
+  };
+}
+
+function normalizeBrainHealthPart1Incoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const patient = b.patient && typeof b.patient === "object" ? b.patient : {};
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : b;
+
+  const yesNo = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (!s) return "";
+    if (s === "yes" || s === "y" || s === "true" || s === "1") return "yes";
+    if (s === "no" || s === "n" || s === "false" || s === "0") return "no";
+    return "";
+  };
+
+  const sex =
+    typeof patient.sex === "string"
+      ? patient.sex.trim().toLowerCase()
+      : typeof assessment.sex === "string"
+        ? assessment.sex.trim().toLowerCase()
+        : "";
+  const age = parseOptionalIntegerLoose(patient.age ?? assessment.age);
+
+  const normPatient = {
+    name: typeof patient.name === "string" ? patient.name.trim() : "",
+    sex: sex === "male" || sex === "female" ? sex : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+
+  const fsrs = assessment?.fsrs && typeof assessment.fsrs === "object" ? assessment.fsrs : {};
+  const caide = assessment?.caide && typeof assessment.caide === "object" ? assessment.caide : {};
+  const risk = assessment?.brainHealthRiskScore && typeof assessment.brainHealthRiskScore === "object" ? assessment.brainHealthRiskScore : {};
+  const libra = assessment?.libra && typeof assessment.libra === "object" ? assessment.libra : {};
+  const part1 = assessment?.part1 && typeof assessment.part1 === "object" ? assessment.part1 : {};
+
+  const n = (v) => parseOptionalNumberLoose(v);
+  const points03 = (v) => {
+    const num = parseOptionalIntegerLoose(v);
+    if (!Number.isFinite(num)) return null;
+    const clamped = Math.max(0, Math.min(3, Math.trunc(num)));
+    return clamped;
+  };
+
+  const structuralDamage = part1?.structuralDamage && typeof part1.structuralDamage === "object" ? part1.structuralDamage : {};
+  const brainReserve = part1?.brainReserve && typeof part1.brainReserve === "object" ? part1.brainReserve : {};
+
+  const normAssessment = {
+    fsrs: {
+      sbp: n(fsrs.sbp),
+      antihypertensiveTreatment: yesNo(fsrs.antihypertensiveTreatment),
+      diabetes: yesNo(fsrs.diabetes),
+      smoker: yesNo(fsrs.smoker),
+      priorCvd: yesNo(fsrs.priorCvd),
+      atrialFibrillation: yesNo(fsrs.atrialFibrillation),
+      lvhOnEcg: yesNo(fsrs.lvhOnEcg)
+    },
+    caide: {
+      educationYears: n(caide.educationYears),
+      sbp: n(caide.sbp),
+      bmi: n(caide.bmi),
+      totalCholesterolMgDl: n(caide.totalCholesterolMgDl),
+      totalCholesterolMmolL: n(caide.totalCholesterolMmolL),
+      physicallyActive: yesNo(caide.physicallyActive),
+      apoeE4Carrier: yesNo(caide.apoeE4Carrier)
+    },
+    brainHealthRiskScore: {
+      vascular: {
+        hypertension: yesNo(risk?.vascular?.hypertension),
+        diabetesOrHbA1cHigh: yesNo(risk?.vascular?.diabetesOrHbA1cHigh),
+        ldlHigh: yesNo(risk?.vascular?.ldlHigh),
+        smoking: yesNo(risk?.vascular?.smoking),
+        carotidPlaqueOrCimtHigh: yesNo(risk?.vascular?.carotidPlaqueOrCimtHigh)
+      },
+      metabolic: {
+        bmiGt30: yesNo(risk?.metabolic?.bmiGt30),
+        insulinResistance: yesNo(risk?.metabolic?.insulinResistance),
+        triglyceridesHigh: yesNo(risk?.metabolic?.triglyceridesHigh),
+        lowHdl: yesNo(risk?.metabolic?.lowHdl),
+        fattyLiver: yesNo(risk?.metabolic?.fattyLiver),
+        hsCrpHigh: yesNo(risk?.metabolic?.hsCrpHigh)
+      },
+      imaging: {
+        whiteMatterHyperintensities: yesNo(risk?.imaging?.whiteMatterHyperintensities),
+        silentInfarcts: yesNo(risk?.imaging?.silentInfarcts),
+        brainAtrophy: yesNo(risk?.imaging?.brainAtrophy)
+      },
+      lifestyle: {
+        physicalInactivity: yesNo(risk?.lifestyle?.physicalInactivity),
+        poorDiet: yesNo(risk?.lifestyle?.poorDiet),
+        alcoholExcess: yesNo(risk?.lifestyle?.alcoholExcess),
+        smoking: yesNo(risk?.lifestyle?.smoking),
+        lowCognitiveStimulation: yesNo(risk?.lifestyle?.lowCognitiveStimulation)
+      },
+      sleep: {
+        stopBangHigh: yesNo(risk?.sleep?.stopBangHigh),
+        sleepDurationLt6h: yesNo(risk?.sleep?.sleepDurationLt6h),
+        chronicInsomnia: yesNo(risk?.sleep?.chronicInsomnia)
+      },
+      nutritional: {
+        vitaminB12Deficiency: yesNo(risk?.nutritional?.vitaminB12Deficiency),
+        vitaminDDeficiency: yesNo(risk?.nutritional?.vitaminDDeficiency),
+        homocysteineGt15: yesNo(risk?.nutritional?.homocysteineGt15)
+      },
+      autonomic: {
+        lowHrv: yesNo(risk?.autonomic?.lowHrv),
+        orthostaticHypotension: yesNo(risk?.autonomic?.orthostaticHypotension),
+        hyposmia: yesNo(risk?.autonomic?.hyposmia)
+      }
+    },
+    libra: {
+      depression: yesNo(libra.depression),
+      diabetes: yesNo(libra.diabetes),
+      hypertensionMidlife: yesNo(libra.hypertensionMidlife),
+      obesityBmiGt30: yesNo(libra.obesityBmiGt30),
+      hypercholesterolemia: yesNo(libra.hypercholesterolemia),
+      currentSmoking: yesNo(libra.currentSmoking),
+      lowSocialActivity: yesNo(libra.lowSocialActivity),
+      highPhysicalActivity: yesNo(libra.highPhysicalActivity),
+      moderateAlcoholUse: yesNo(libra.moderateAlcoholUse),
+      highCognitiveActivity: yesNo(libra.highCognitiveActivity),
+      healthyDiet: yesNo(libra.healthyDiet),
+      chdCvd: yesNo(libra.chdCvd)
+    },
+    part1: {
+      brainAgingYears: n(part1.brainAgingYears),
+      omega3Index: typeof part1.omega3Index === "string" ? part1.omega3Index.trim().toLowerCase() : "",
+      brainReserve: {
+        education: yesNo(brainReserve.education),
+        cognitiveActivity: yesNo(brainReserve.cognitiveActivity),
+        bilingualism: yesNo(brainReserve.bilingualism),
+        socialInteraction: yesNo(brainReserve.socialInteraction)
+      },
+      structuralDamage: {
+        whiteMatterDiseasePoints: points03(structuralDamage.whiteMatterDiseasePoints),
+        silentInfarctsPoints: points03(structuralDamage.silentInfarctsPoints),
+        brainAtrophyPoints: points03(structuralDamage.brainAtrophyPoints),
+        microbleedsPoints: points03(structuralDamage.microbleedsPoints),
+        arterialStenosisPoints: points03(structuralDamage.arterialStenosisPoints)
+      }
+    }
+  };
+
+  return { patient: normPatient, assessment: normAssessment };
+}
+
+function computeBrainHealthRiskScoreFromFlags(brainHealthRiskScore) {
+  const root = brainHealthRiskScore && typeof brainHealthRiskScore === "object" ? brainHealthRiskScore : {};
+  const yes = (v) => v === "yes";
+  const total =
+    (yes(root?.vascular?.hypertension) ? 5 : 0) +
+    (yes(root?.vascular?.diabetesOrHbA1cHigh) ? 5 : 0) +
+    (yes(root?.vascular?.ldlHigh) ? 3 : 0) +
+    (yes(root?.vascular?.smoking) ? 5 : 0) +
+    (yes(root?.vascular?.carotidPlaqueOrCimtHigh) ? 7 : 0) +
+    (yes(root?.metabolic?.bmiGt30) ? 3 : 0) +
+    (yes(root?.metabolic?.insulinResistance) ? 5 : 0) +
+    (yes(root?.metabolic?.triglyceridesHigh) ? 3 : 0) +
+    (yes(root?.metabolic?.lowHdl) ? 3 : 0) +
+    (yes(root?.metabolic?.fattyLiver) ? 3 : 0) +
+    (yes(root?.metabolic?.hsCrpHigh) ? 3 : 0) +
+    (yes(root?.imaging?.whiteMatterHyperintensities) ? 5 : 0) +
+    (yes(root?.imaging?.silentInfarcts) ? 5 : 0) +
+    (yes(root?.imaging?.brainAtrophy) ? 5 : 0) +
+    (yes(root?.lifestyle?.physicalInactivity) ? 4 : 0) +
+    (yes(root?.lifestyle?.poorDiet) ? 3 : 0) +
+    (yes(root?.lifestyle?.alcoholExcess) ? 3 : 0) +
+    (yes(root?.lifestyle?.smoking) ? 3 : 0) +
+    (yes(root?.lifestyle?.lowCognitiveStimulation) ? 2 : 0) +
+    (yes(root?.sleep?.stopBangHigh) ? 5 : 0) +
+    (yes(root?.sleep?.sleepDurationLt6h) ? 3 : 0) +
+    (yes(root?.sleep?.chronicInsomnia) ? 2 : 0) +
+    (yes(root?.nutritional?.vitaminB12Deficiency) ? 3 : 0) +
+    (yes(root?.nutritional?.vitaminDDeficiency) ? 3 : 0) +
+    (yes(root?.nutritional?.homocysteineGt15) ? 4 : 0) +
+    (yes(root?.autonomic?.lowHrv) ? 2 : 0) +
+    (yes(root?.autonomic?.orthostaticHypotension) ? 2 : 0) +
+    (yes(root?.autonomic?.hyposmia) ? 1 : 0);
+
+  const category = total <= 20 ? "Low risk" : total <= 40 ? "Moderate risk" : total <= 60 ? "High risk" : "Very high risk";
+  return { score: total, category };
+}
+
+function computeBrainHealthScoreMeaning(score) {
+  if (!Number.isFinite(score)) return "";
+  if (score >= 85) return "Excellent brain health";
+  if (score >= 70) return "Mild risk";
+  if (score >= 55) return "Moderate risk";
+  if (score >= 40) return "High risk";
+  return "Very high risk";
+}
+
+function computeFsrs({ sex, age, sbp, treated, diabetes, smoker, priorCvd, afib, lvh }) {
+  const s = typeof sex === "string" ? sex.trim().toLowerCase() : "";
+  if (s !== "male" && s !== "female") return { points: null, risk10y: "" };
+  if (!Number.isFinite(age)) return { points: null, risk10y: "" };
+  if (!Number.isFinite(sbp)) return { points: null, risk10y: "" };
+
+  const agePoints = (() => {
+    if (age < 54) return null;
+    if (age <= 56) return 0;
+    if (age <= 59) return 1;
+    if (age <= 62) return 2;
+    if (age <= 65) return 3;
+    if (age <= 68) return 4;
+    if (age <= 71) return 5;
+    if (age <= 74) return 6;
+    if (age <= 77) return 7;
+    if (age <= 80) return 8;
+    if (age <= 83) return 9;
+    if (age <= 86) return 10;
+    return null;
+  })();
+  if (agePoints == null) return { points: null, risk10y: "" };
+
+  const sbpBinsMen = [
+    { min: 95, max: 105, untreated: 0, treated: 2 },
+    { min: 106, max: 115, untreated: 1, treated: 3 },
+    { min: 116, max: 125, untreated: 1, treated: 4 },
+    { min: 126, max: 135, untreated: 2, treated: 5 },
+    { min: 136, max: 145, untreated: 3, treated: 6 },
+    { min: 146, max: 155, untreated: 4, treated: 7 },
+    { min: 156, max: 165, untreated: 5, treated: 8 },
+    { min: 166, max: 175, untreated: 6, treated: 9 },
+    { min: 176, max: 185, untreated: 7, treated: 10 },
+    { min: 186, max: 195, untreated: 8, treated: 11 },
+    { min: 196, max: 205, untreated: 9, treated: 12 }
+  ];
+  const sbpBinsWomen = [
+    { min: 95, max: 105, untreated: 0, treated: 3 },
+    { min: 106, max: 115, untreated: 1, treated: 4 },
+    { min: 116, max: 125, untreated: 2, treated: 5 },
+    { min: 126, max: 135, untreated: 3, treated: 6 },
+    { min: 136, max: 145, untreated: 4, treated: 7 },
+    { min: 146, max: 155, untreated: 5, treated: 8 },
+    { min: 156, max: 165, untreated: 6, treated: 9 },
+    { min: 166, max: 175, untreated: 7, treated: 10 },
+    { min: 176, max: 185, untreated: 8, treated: 11 },
+    { min: 186, max: 195, untreated: 9, treated: 12 },
+    { min: 196, max: 205, untreated: 10, treated: 13 }
+  ];
+
+  const binList = s === "male" ? sbpBinsMen : sbpBinsWomen;
+  const bin = binList.find((b) => sbp >= b.min && sbp <= b.max) ?? (sbp < binList[0].min ? binList[0] : binList[binList.length - 1]);
+  const sbpPoints = treated ? bin.treated : bin.untreated;
+
+  const otherPoints =
+    (diabetes ? (s === "male" ? 2 : 3) : 0) +
+    (smoker ? 3 : 0) +
+    (priorCvd ? (s === "male" ? 3 : 2) : 0) +
+    (afib ? (s === "male" ? 4 : 6) : 0) +
+    (lvh ? (s === "male" ? 3 : 4) : 0);
+
+  const total = agePoints + sbpPoints + otherPoints;
+
+  const riskTableMen = new Map([
+    [1, "3%"],
+    [2, "3%"],
+    [3, "4%"],
+    [4, "4%"],
+    [5, "5%"],
+    [6, "5%"],
+    [7, "6%"],
+    [8, "7%"],
+    [9, "8%"],
+    [10, "10%"],
+    [11, "11%"],
+    [12, "13%"],
+    [13, "15%"],
+    [14, "17%"],
+    [15, "20%"],
+    [16, "22%"],
+    [17, "26%"],
+    [18, "29%"],
+    [19, "33%"],
+    [20, "37%"],
+    [21, "42%"],
+    [22, "47%"],
+    [23, "52%"],
+    [24, "57%"],
+    [25, "63%"]
+  ]);
+  const riskTableWomen = new Map([
+    [1, "1%"],
+    [2, "1%"],
+    [3, "2%"],
+    [4, "2%"],
+    [5, "2%"],
+    [6, "3%"],
+    [7, "4%"],
+    [8, "4%"],
+    [9, "5%"],
+    [10, "6%"],
+    [11, "8%"],
+    [12, "9%"],
+    [13, "11%"],
+    [14, "13%"],
+    [15, "16%"],
+    [16, "19%"],
+    [17, "23%"],
+    [18, "27%"],
+    [19, "32%"],
+    [20, "37%"],
+    [21, "43%"],
+    [22, "50%"],
+    [23, "57%"]
+  ]);
+
+  const table = s === "male" ? riskTableMen : riskTableWomen;
+  const risk = table.get(total) ?? (s === "male" ? (total >= 26 ? ">63%" : "") : total >= 24 ? ">57%" : "");
+
+  return { points: total, risk10y: risk };
+}
+
+function computeCaide({ age, sex, educationYears, sbp, bmi, cholMgDl, cholMmolL, physicallyActive, apoeCarrier }) {
+  if (!Number.isFinite(age)) return { score: null, risk20y: "", table: "" };
+  const s = typeof sex === "string" ? sex.trim().toLowerCase() : "";
+  if (s !== "male" && s !== "female") return { score: null, risk20y: "", table: "" };
+
+  const agePts = age < 47 ? 0 : age <= 53 ? 3 : 4;
+  const eduPts = Number.isFinite(educationYears) ? (educationYears > 10 ? 0 : educationYears >= 7 ? 2 : 3) : null;
+  if (eduPts == null) return { score: null, risk20y: "", table: "" };
+
+  const sbpPts = Number.isFinite(sbp) ? (sbp > 140 ? 2 : 0) : null;
+  const bmiPts = Number.isFinite(bmi) ? (bmi > 30 ? 2 : 0) : null;
+  if (sbpPts == null || bmiPts == null) return { score: null, risk20y: "", table: "" };
+
+  const cholFromMg = Number.isFinite(cholMgDl) ? cholMgDl : null;
+  const cholFromMmol = Number.isFinite(cholMmolL) ? cholMmolL * 38.67 : null;
+  const chol = cholFromMg ?? cholFromMmol;
+  const cholPts = Number.isFinite(chol) ? (chol > 251 ? 2 : 0) : null;
+  if (cholPts == null) return { score: null, risk20y: "", table: "" };
+
+  const activity = physicallyActive === "yes" ? 0 : physicallyActive === "no" ? 1 : null;
+  if (activity == null) return { score: null, risk20y: "", table: "" };
+
+  const sexPts = s === "male" ? 1 : 0;
+  const apoePts = apoeCarrier === "yes" ? 2 : apoeCarrier === "no" ? 0 : null;
+
+  const base = agePts + eduPts + sexPts + sbpPts + bmiPts + cholPts + activity;
+  const useApoeTable = apoePts != null;
+  const total = useApoeTable ? base + apoePts : base;
+
+  const riskWithout = (score) => {
+    if (score <= 5) return "1% (Low)";
+    if (score <= 7) return "3% (Moderate)";
+    if (score <= 9) return "4% (Moderate)";
+    if (score <= 11) return "7% (High)";
+    return "16% (Very High)";
+  };
+  const riskWith = (score) => {
+    if (score <= 5) return "1% (Low)";
+    if (score <= 7) return "2% (Low-Moderate)";
+    if (score <= 9) return "4% (Moderate)";
+    if (score <= 11) return "6% (Moderate-High)";
+    if (score <= 13) return "10% (High)";
+    return "18% (Very High)";
+  };
+
+  return { score: total, risk20y: useApoeTable ? riskWith(total) : riskWithout(total), table: useApoeTable ? "with_apoe" : "without_apoe" };
+}
+
+function computeLibra(state) {
+  const yes = (v) => v === "yes";
+  const highPhysical = yes(state?.highPhysicalActivity);
+  const score =
+    (yes(state?.depression) ? 2.1 : 0) +
+    (yes(state?.diabetes) ? 1.3 : 0) +
+    (yes(state?.hypertensionMidlife) ? 1.6 : 0) +
+    (yes(state?.obesityBmiGt30) ? 1.6 : 0) +
+    (yes(state?.hypercholesterolemia) ? 1.4 : 0) +
+    (yes(state?.currentSmoking) ? 1.5 : 0) +
+    (yes(state?.lowSocialActivity) ? 1.0 : 0) +
+    (yes(state?.chdCvd) ? 1.0 : 0) +
+    (highPhysical ? -1.1 : 1.1) +
+    (yes(state?.moderateAlcoholUse) ? -0.9 : 0) +
+    (yes(state?.highCognitiveActivity) ? -1.0 : 0) +
+    (yes(state?.healthyDiet) ? -1.2 : 0);
+  return { score: Number.isFinite(score) ? score.toFixed(1) : "" };
+}
+
+function computeStructuralDamage(structuralDamage) {
+  const sd = structuralDamage && typeof structuralDamage === "object" ? structuralDamage : {};
+  const values = [
+    sd.whiteMatterDiseasePoints,
+    sd.silentInfarctsPoints,
+    sd.brainAtrophyPoints,
+    sd.microbleedsPoints,
+    sd.arterialStenosisPoints
+  ];
+  const nums = values.map((v) => (Number.isFinite(v) ? v : null));
+  const hasAny = nums.some((v) => v != null);
+  if (!hasAny) return { total: null, meaning: "", breakdown: [] };
+
+  const safe = nums.map((v) => (v == null ? 0 : Math.max(0, Math.min(3, Math.trunc(v)))));
+  const total = safe.reduce((sum, x) => sum + x, 0);
+  const meaning = total <= 4 ? "Excellent" : total <= 8 ? "Early vascular ageing" : total <= 14 ? "Moderate brain damage" : "Severe disease";
+  const breakdown = [
+    { marker: "White matter disease", points: safe[0] },
+    { marker: "Silent infarcts", points: safe[1] },
+    { marker: "Brain atrophy", points: safe[2] },
+    { marker: "Microbleeds", points: safe[3] },
+    { marker: "Arterial stenosis", points: safe[4] }
+  ];
+  return { total, meaning, breakdown };
+}
+
+function computeBrainLifestyle({ fsrs, brainHealthRiskScore, libra }) {
+  const bp = (() => {
+    let points = 10;
+    if (brainHealthRiskScore?.vascular?.hypertension === "yes") points -= 6;
+    const sbp = Number.isFinite(fsrs?.sbp) ? fsrs.sbp : null;
+    if (Number.isFinite(sbp)) {
+      if (sbp >= 140) points -= 4;
+      else if (sbp >= 130) points -= 2;
+    }
+    return Math.max(0, Math.min(10, points));
+  })();
+
+  const metabolic = (() => {
+    let points = 10;
+    if (brainHealthRiskScore?.metabolic?.bmiGt30 === "yes") points -= 2;
+    if (brainHealthRiskScore?.metabolic?.insulinResistance === "yes") points -= 2;
+    if (brainHealthRiskScore?.metabolic?.triglyceridesHigh === "yes") points -= 1;
+    if (brainHealthRiskScore?.metabolic?.lowHdl === "yes") points -= 1;
+    if (brainHealthRiskScore?.metabolic?.fattyLiver === "yes") points -= 1;
+    if (brainHealthRiskScore?.metabolic?.hsCrpHigh === "yes") points -= 1;
+    return Math.max(0, Math.min(10, points));
+  })();
+
+  const lifestyle = (() => {
+    let points = 10;
+    if (brainHealthRiskScore?.lifestyle?.physicalInactivity === "yes") points -= 2;
+    if (brainHealthRiskScore?.lifestyle?.poorDiet === "yes") points -= 2;
+    if (brainHealthRiskScore?.lifestyle?.alcoholExcess === "yes") points -= 2;
+    if (brainHealthRiskScore?.lifestyle?.smoking === "yes") points -= 2;
+    if (brainHealthRiskScore?.lifestyle?.lowCognitiveStimulation === "yes") points -= 2;
+    return Math.max(0, Math.min(10, points));
+  })();
+
+  const sleep = (() => {
+    let points = 5;
+    if (brainHealthRiskScore?.sleep?.stopBangHigh === "yes") points -= 2;
+    if (brainHealthRiskScore?.sleep?.sleepDurationLt6h === "yes") points -= 2;
+    if (brainHealthRiskScore?.sleep?.chronicInsomnia === "yes") points -= 1;
+    return Math.max(0, Math.min(5, points));
+  })();
+
+  const psychosocial = (() => {
+    let points = 5;
+    if (libra?.depression === "yes") points -= 3;
+    if (libra?.lowSocialActivity === "yes") points -= 2;
+    return Math.max(0, Math.min(5, points));
+  })();
+
+  const total = bp + metabolic + lifestyle + sleep + psychosocial;
+  return {
+    total,
+    domains: [
+      { key: "blood_pressure", label: "Blood pressure", points: bp, max: 10 },
+      { key: "metabolic", label: "Metabolic health", points: metabolic, max: 10 },
+      { key: "lifestyle", label: "Lifestyle", points: lifestyle, max: 10 },
+      { key: "sleep", label: "Sleep", points: sleep, max: 5 },
+      { key: "psychosocial", label: "Psychosocial", points: psychosocial, max: 5 }
+    ]
+  };
+}
+
+function computeBrainReserve(brainReserve) {
+  const br = brainReserve && typeof brainReserve === "object" ? brainReserve : {};
+  const yes = (v) => v === "yes";
+  const score = (yes(br.education) ? 1 : 0) + (yes(br.cognitiveActivity) ? 1 : 0) + (yes(br.bilingualism) ? 1 : 0) + (yes(br.socialInteraction) ? 1 : 0);
+  const category = score >= 3 ? "High" : score === 2 ? "Moderate" : "Low";
+  return { score, category };
+}
+
+function computeBrainHealthPart1({ patient, assessment }) {
+  const p = patient && typeof patient === "object" ? patient : {};
+  const a = assessment && typeof assessment === "object" ? assessment : {};
+
+  const risk = computeBrainHealthRiskScoreFromFlags(a.brainHealthRiskScore);
+  const brainHealthScore = Number.isFinite(risk.score) ? Math.max(0, Math.min(100, 100 - risk.score)) : null;
+  const brainHealthMeaning = computeBrainHealthScoreMeaning(brainHealthScore);
+
+  const fsrsInputs = {
+    sex: p.sex,
+    age: p.age,
+    sbp: a?.fsrs?.sbp,
+    treated: a?.fsrs?.antihypertensiveTreatment === "yes",
+    diabetes: a?.fsrs?.diabetes === "yes",
+    smoker: a?.fsrs?.smoker === "yes",
+    priorCvd: a?.fsrs?.priorCvd === "yes",
+    afib: a?.fsrs?.atrialFibrillation === "yes",
+    lvh: a?.fsrs?.lvhOnEcg === "yes"
+  };
+  const fsrsComputed = computeFsrs(fsrsInputs);
+  const average = computeFsrs({ sex: p.sex, age: p.age, sbp: 125, treated: false, diabetes: false, smoker: false, priorCvd: false, afib: false, lvh: false });
+  const optimal = computeFsrs({ sex: p.sex, age: p.age, sbp: 110, treated: false, diabetes: false, smoker: false, priorCvd: false, afib: false, lvh: false });
+
+  const caideComputed = computeCaide({
+    age: p.age,
+    sex: p.sex,
+    educationYears: a?.caide?.educationYears,
+    sbp: a?.caide?.sbp,
+    bmi: a?.caide?.bmi,
+    cholMgDl: a?.caide?.totalCholesterolMgDl,
+    cholMmolL: a?.caide?.totalCholesterolMmolL,
+    physicallyActive: a?.caide?.physicallyActive,
+    apoeCarrier: a?.caide?.apoeE4Carrier
+  });
+  const libraComputed = computeLibra(a.libra);
+  const structuralDamage = computeStructuralDamage(a?.part1?.structuralDamage);
+  const brainLifestyle = computeBrainLifestyle({ fsrs: a.fsrs, brainHealthRiskScore: a.brainHealthRiskScore, libra: a.libra });
+  const brainReserve = computeBrainReserve(a?.part1?.brainReserve);
+
+  const omega3 = a?.part1?.omega3Index === "optimal" ? "optimal" : a?.part1?.omega3Index === "borderline" ? "borderline" : a?.part1?.omega3Index === "low" ? "low" : "";
+  const neuroMetabolic = {
+    homocysteine: a?.brainHealthRiskScore?.nutritional?.homocysteineGt15 === "yes" ? "high" : a?.brainHealthRiskScore?.nutritional?.homocysteineGt15 === "no" ? "normal" : "",
+    b12: a?.brainHealthRiskScore?.nutritional?.vitaminB12Deficiency === "yes" ? "low" : a?.brainHealthRiskScore?.nutritional?.vitaminB12Deficiency === "no" ? "normal" : "",
+    vitaminD: a?.brainHealthRiskScore?.nutritional?.vitaminDDeficiency === "yes" ? "low" : a?.brainHealthRiskScore?.nutritional?.vitaminDDeficiency === "no" ? "normal" : "",
+    omega3
+  };
+
+  return {
+    brainHealthScore,
+    brainHealthMeaning,
+    riskScore: risk.score,
+    riskCategory: risk.category,
+    brainAgingYears: Number.isFinite(a?.part1?.brainAgingYears) ? a.part1.brainAgingYears : null,
+    stroke: {
+      your10y: fsrsComputed?.risk10y ?? "",
+      average10y: average?.risk10y ?? "",
+      optimal10y: optimal?.risk10y ?? ""
+    },
+    dementia: {
+      caideRisk20y: caideComputed?.risk20y ?? "",
+      libraScore: libraComputed?.score ?? "",
+      brainReserveScore: brainReserve.score,
+      brainReserveCategory: brainReserve.category
+    },
+    structuralDamage,
+    brainLifestyle,
+    neuroMetabolic
+  };
+}
+
+function normalizeBrainHealthPart2Incoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const patient = b.patient && typeof b.patient === "object" ? b.patient : {};
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : b;
+
+  const yesNo = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (!s) return "";
+    if (s === "yes" || s === "y" || s === "true" || s === "1") return "yes";
+    if (s === "no" || s === "n" || s === "false" || s === "0") return "no";
+    return "";
+  };
+
+  const sex =
+    typeof patient.sex === "string"
+      ? patient.sex.trim().toLowerCase()
+      : typeof assessment.sex === "string"
+        ? assessment.sex.trim().toLowerCase()
+        : "";
+  const age = parseOptionalIntegerLoose(patient.age ?? assessment.age);
+
+  const normPatient = {
+    name: typeof patient.name === "string" ? patient.name.trim() : "",
+    sex: sex === "male" || sex === "female" ? sex : "",
+    age: Number.isFinite(age) && age > 0 ? age : null
+  };
+
+  const fsrs = assessment?.fsrs && typeof assessment.fsrs === "object" ? assessment.fsrs : {};
+  const risk = assessment?.brainHealthRiskScore && typeof assessment.brainHealthRiskScore === "object" ? assessment.brainHealthRiskScore : {};
+  const part2 = assessment?.part2 && typeof assessment.part2 === "object" ? assessment.part2 : {};
+  const mriDamage = part2?.mriDamage && typeof part2.mriDamage === "object" ? part2.mriDamage : {};
+  const lifestyle = part2?.lifestyle && typeof part2.lifestyle === "object" ? part2.lifestyle : {};
+
+  const n = (v) => parseOptionalNumberLoose(v);
+  const moca = parseOptionalIntegerLoose(part2.mocaScore);
+
+  const fazekas = (() => {
+    const num = parseOptionalIntegerLoose(mriDamage.fazekasGrade);
+    if (!Number.isFinite(num)) return null;
+    const clamped = Math.max(0, Math.min(3, Math.trunc(num)));
+    return clamped;
+  })();
+
+  const atrophySeverity = (() => {
+    const s = typeof mriDamage.atrophySeverity === "string" ? mriDamage.atrophySeverity.trim().toLowerCase() : "";
+    return s === "none" || s === "mild" || s === "moderate_severe" ? s : "";
+  })();
+
+  const silentInfarcts = (() => {
+    const s = typeof mriDamage.silentInfarcts === "string" ? mriDamage.silentInfarcts.trim().toLowerCase() : "";
+    return s === "none" || s === "single" || s === "multiple" ? s : "";
+  })();
+
+  const microbleeds = (() => {
+    const s = typeof mriDamage.microbleeds === "string" ? mriDamage.microbleeds.trim().toLowerCase() : "";
+    return s === "none" || s === "1-2" || s === "ge3" ? s : "";
+  })();
+
+  const dietQuality = (() => {
+    const s = typeof lifestyle.dietQuality === "string" ? lifestyle.dietQuality.trim().toLowerCase() : "";
+    return s === "poor" || s === "moderate" || s === "healthy" ? s : "";
+  })();
+
+  const cognitiveActivity = (() => {
+    const s = typeof lifestyle.cognitiveActivity === "string" ? lifestyle.cognitiveActivity.trim().toLowerCase() : "";
+    return s === "low" || s === "moderate" || s === "high" ? s : "";
+  })();
+
+  const normAssessment = {
+    fsrs: {
+      sbp: n(fsrs.sbp),
+      antihypertensiveTreatment: yesNo(fsrs.antihypertensiveTreatment),
+      diabetes: yesNo(fsrs.diabetes),
+      smoker: yesNo(fsrs.smoker),
+      priorCvd: yesNo(fsrs.priorCvd),
+      atrialFibrillation: yesNo(fsrs.atrialFibrillation),
+      lvhOnEcg: yesNo(fsrs.lvhOnEcg)
+    },
+    brainHealthRiskScore: {
+      vascular: {
+        hypertension: yesNo(risk?.vascular?.hypertension),
+        diabetesOrHbA1cHigh: yesNo(risk?.vascular?.diabetesOrHbA1cHigh),
+        ldlHigh: yesNo(risk?.vascular?.ldlHigh),
+        smoking: yesNo(risk?.vascular?.smoking),
+        carotidPlaqueOrCimtHigh: yesNo(risk?.vascular?.carotidPlaqueOrCimtHigh)
+      },
+      metabolic: {
+        bmiGt30: yesNo(risk?.metabolic?.bmiGt30)
+      },
+      lifestyle: {
+        smoking: yesNo(risk?.lifestyle?.smoking)
+      }
+    },
+    part2: {
+      mriDamage: {
+        fazekasGrade: fazekas,
+        atrophySeverity,
+        silentInfarcts,
+        microbleeds,
+        intracranialDisease: yesNo(mriDamage.intracranialDisease)
+      },
+      lifestyle: {
+        weeklyExerciseMin: n(lifestyle.weeklyExerciseMin),
+        dietQuality,
+        sleepHours: n(lifestyle.sleepHours),
+        sleepApnea: yesNo(lifestyle.sleepApnea),
+        cognitiveActivity,
+        socialEngagement: yesNo(lifestyle.socialEngagement),
+        noSmoking: yesNo(lifestyle.noSmoking)
+      },
+      mocaScore: Number.isFinite(moca) ? moca : null
+    }
+  };
+
+  return { patient: normPatient, assessment: normAssessment };
+}
+
+function computeBrainHealthPart2({ patient, assessment }) {
+  const p = patient && typeof patient === "object" ? patient : {};
+  const a = assessment && typeof assessment === "object" ? assessment : {};
+  const mri = a?.part2?.mriDamage && typeof a.part2.mriDamage === "object" ? a.part2.mriDamage : {};
+  const life = a?.part2?.lifestyle && typeof a.part2.lifestyle === "object" ? a.part2.lifestyle : {};
+
+  const mriDamageIndex = (() => {
+    const breakdown = [];
+    const add = (item, points) => breakdown.push({ item, points });
+
+    const fazekas = Number.isFinite(mri.fazekasGrade) ? mri.fazekasGrade : null;
+    add("White matter hyperintensities (Fazekas)", fazekas == null ? null : fazekas);
+
+    const atrophy = mri.atrophySeverity === "mild" ? 1 : mri.atrophySeverity === "moderate_severe" ? 2 : mri.atrophySeverity === "none" ? 0 : null;
+    add("Brain atrophy", atrophy);
+
+    const infarcts = mri.silentInfarcts === "single" ? 1 : mri.silentInfarcts === "multiple" ? 2 : mri.silentInfarcts === "none" ? 0 : null;
+    add("Silent infarcts", infarcts);
+
+    const micro = mri.microbleeds === "1-2" ? 1 : mri.microbleeds === "ge3" ? 2 : mri.microbleeds === "none" ? 0 : null;
+    add("Microbleeds", micro);
+
+    const intracranial = mri.intracranialDisease === "yes" ? 1 : mri.intracranialDisease === "no" ? 0 : null;
+    add("Intracranial stenosis / calcification", intracranial);
+
+    const nums = breakdown.map((x) => (Number.isFinite(x.points) ? x.points : null));
+    const hasAny = nums.some((v) => v != null);
+    if (!hasAny) return { score: null, breakdown };
+    const score = nums.reduce((sum, v) => sum + (v == null ? 0 : v), 0);
+    return { score: Math.max(0, Math.min(10, score)), breakdown };
+  })();
+
+  const vascularRiskScore = (() => {
+    const breakdown = [];
+    const add = (item, points) => breakdown.push({ item, points });
+    const yes = (v) => v === "yes";
+
+    const hypertension = yes(a?.brainHealthRiskScore?.vascular?.hypertension) ? 2 : 0;
+    add("Hypertension", hypertension);
+    const diabetes = yes(a?.brainHealthRiskScore?.vascular?.diabetesOrHbA1cHigh) ? 2 : 0;
+    add("Diabetes", diabetes);
+
+    const smoking =
+      yes(a?.brainHealthRiskScore?.vascular?.smoking) ||
+      yes(a?.brainHealthRiskScore?.lifestyle?.smoking) ||
+      yes(a?.fsrs?.smoker) ||
+      life.noSmoking === "no"
+        ? 2
+        : 0;
+    add("Smoking", smoking);
+
+    const ldl = yes(a?.brainHealthRiskScore?.vascular?.ldlHigh) ? 1 : 0;
+    add("LDL > 130", ldl);
+
+    const obesity = yes(a?.brainHealthRiskScore?.metabolic?.bmiGt30) ? 1 : 0;
+    add("Obesity", obesity);
+
+    const af = yes(a?.fsrs?.atrialFibrillation) ? 2 : 0;
+    add("Atrial fibrillation", af);
+
+    const score = hypertension + diabetes + smoking + ldl + obesity + af;
+    return { score: Math.max(0, Math.min(10, score)), breakdown };
+  })();
+
+  const lifestyleProtectionScore = (() => {
+    const breakdown = [];
+    const add = (item, points) => breakdown.push({ item, points });
+    const yes = (v) => v === "yes";
+
+    const exMin = Number.isFinite(life.weeklyExerciseMin) ? life.weeklyExerciseMin : null;
+    const exercise = exMin == null ? null : exMin < 60 ? 0 : exMin < 150 ? 1 : 2;
+    add("Regular exercise", exercise);
+
+    const diet = life.dietQuality === "healthy" ? 2 : life.dietQuality === "moderate" ? 1 : life.dietQuality === "poor" ? 0 : null;
+    add("Healthy diet", diet);
+
+    const sleepHours = Number.isFinite(life.sleepHours) ? life.sleepHours : null;
+    const sleep = life.sleepApnea === "yes" || (sleepHours != null && sleepHours < 6) ? 0 : sleepHours == null ? null : sleepHours < 7 ? 1 : sleepHours <= 8 ? 2 : 1;
+    add("Good sleep", sleep);
+
+    const cognitive = life.cognitiveActivity === "high" ? 2 : life.cognitiveActivity === "moderate" ? 1 : life.cognitiveActivity === "low" ? 0 : null;
+    add("Cognitive stimulation", cognitive);
+
+    const social = yes(life.socialEngagement) ? 1 : life.socialEngagement === "no" ? 0 : null;
+    add("Social engagement", social);
+
+    const noSmoking = yes(life.noSmoking) ? 1 : life.noSmoking === "no" ? 0 : null;
+    add("No smoking", noSmoking);
+
+    const nums = breakdown.map((x) => (Number.isFinite(x.points) ? x.points : null));
+    const hasAny = nums.some((v) => v != null);
+    if (!hasAny) return { score: null, breakdown };
+    const score = nums.reduce((sum, v) => sum + (v == null ? 0 : v), 0);
+    return { score: Math.max(0, Math.min(10, score)), breakdown };
+  })();
+
+  const age = Number.isFinite(p.age) ? p.age : null;
+  const mriScore = Number.isFinite(mriDamageIndex.score) ? mriDamageIndex.score : null;
+  const vascularScore = Number.isFinite(vascularRiskScore.score) ? vascularRiskScore.score : null;
+  const lifestyleScore = Number.isFinite(lifestyleProtectionScore.score) ? lifestyleProtectionScore.score : null;
+
+  const moca = Number.isFinite(a?.part2?.mocaScore) ? a.part2.mocaScore : null;
+  const mocaAdjustmentYears = moca == null ? 0 : moca >= 26 ? -1 : moca >= 23 ? 0 : 2;
+
+  const brainAgeRaw =
+    age != null && mriScore != null && vascularScore != null && lifestyleScore != null
+      ? age + mriScore * 1.5 + vascularScore * 0.8 - lifestyleScore * 0.5 + mocaAdjustmentYears
+      : null;
+
+  const brainAgeRounded = brainAgeRaw == null ? null : Math.round(brainAgeRaw);
+  const deltaYears = brainAgeRaw == null || age == null ? null : Math.round((brainAgeRaw - age) * 10) / 10;
+
+  const interpretation = (() => {
+    if (deltaYears == null) return "";
+    if (deltaYears <= 0) return "Healthy";
+    if (deltaYears <= 5) return "Mild acceleration";
+    if (deltaYears <= 10) return "Moderate";
+    return "High risk brain ageing";
+  })();
+
+  return {
+    mriDamageIndex,
+    vascularRiskScore,
+    lifestyleProtectionScore,
+    brainAgeRaw: brainAgeRaw == null ? null : Math.round(brainAgeRaw * 10) / 10,
+    brainAgeRounded,
+    deltaYears,
+    interpretation,
+    mocaAdjustmentYears: moca == null ? null : mocaAdjustmentYears,
+    formula: "Brain Age = Age + (MRI × 1.5) + (Vascular × 0.8) − (Lifestyle × 0.5) + MoCA adj."
+  };
+}
+
 function computeDietAssessment({ assessment }) {
   const a = assessment && typeof assessment === "object" ? assessment : {};
   const rule5 = [
@@ -6352,6 +7332,36 @@ gptRouter.post("/social-fitness", upload.none(), (req, res) => {
     res.json({ patient: normalized.patient, assessment: normalized.assessment, computed });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate social fitness" });
+  }
+});
+
+gptRouter.post("/heart-health-score", upload.none(), (req, res) => {
+  try {
+    const normalized = normalizeHeartHealthScoreIncoming(req?.body);
+    const computed = computeHeartHealthScore(normalized);
+    res.json({ patient: normalized.patient, assessment: normalized.assessment, computed });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate heart health score" });
+  }
+});
+
+gptRouter.post("/brain-health-part1", upload.none(), (req, res) => {
+  try {
+    const normalized = normalizeBrainHealthPart1Incoming(req?.body);
+    const computed = computeBrainHealthPart1(normalized);
+    res.json({ patient: normalized.patient, assessment: normalized.assessment, computed });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate brain health summary" });
+  }
+});
+
+gptRouter.post("/brain-health-part2", upload.none(), (req, res) => {
+  try {
+    const normalized = normalizeBrainHealthPart2Incoming(req?.body);
+    const computed = computeBrainHealthPart2(normalized);
+    res.json({ patient: normalized.patient, assessment: normalized.assessment, computed });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate brain age" });
   }
 });
 
