@@ -6,6 +6,9 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { gptRouter } from "./routes/gpt.js";
+import { authRouter } from "./routes/authRoutes.js";
+import { userRouter } from "./routes/userRoutes.js";
+import { connectDb } from "./utils/connectDb.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +94,8 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api", gptRouter);
+app.use("/api/auth", authRouter);
+app.use("/api/users", userRouter);
 
 app.use((err, req, res, next) => {
   const requestId = res.getHeader("x-request-id") || "unknown";
@@ -121,11 +126,24 @@ app.use((err, req, res, next) => {
 
 const port = Number(process.env.PORT) || 3000;
 
-const server = app.listen(port, "0.0.0.0", () => {
-  console.log(`API listening on http://localhost:${port}`);
-});
+async function start() {
+  try {
+    const { connected } = await connectDb();
+    app.locals.dbReady = !!connected;
+    if (!connected) console.warn("MongoDB not connected. Set MONGODB_URI or MONGO_URI to enable auth APIs.");
 
-const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
-server.setTimeout(REQUEST_TIMEOUT_MS);
-server.requestTimeout = REQUEST_TIMEOUT_MS;
-server.headersTimeout = REQUEST_TIMEOUT_MS + 10 * 1000;
+    const server = app.listen(port, "0.0.0.0", () => {
+      console.log(`API listening on http://localhost:${port}`);
+    });
+
+    const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+    server.setTimeout(REQUEST_TIMEOUT_MS);
+    server.requestTimeout = REQUEST_TIMEOUT_MS;
+    server.headersTimeout = REQUEST_TIMEOUT_MS + 10 * 1000;
+  } catch (err) {
+    console.error("Failed to start server:", err);
+    process.exit(1);
+  }
+}
+
+start();

@@ -10,36 +10,36 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAdvancedBodyCompositionHandler } from "../Controllers/AdvancedBodyCompositionController.js";
-import { createBloodAnalysisHandler, createOtherAnalysisHandler } from "../Controllers/BloodOtherController.js";
+import { createAdvancedBodyCompositionHandler } from "../AiControllers/AdvancedBodyCompositionController.js";
+import { createBloodAnalysisHandler, createOtherAnalysisHandler } from "../AiControllers/BloodOtherController.js";
 import {
   createDocsTestsCleanHandler,
   createDocsTestsExcelHandler,
   createDocsTestsHandler
-} from "../Controllers/DocsTestsController.js";
-import { createGptChatHandler } from "../Controllers/GptChatController.js";
+} from "../AiControllers/DocsTestsController.js";
+import { createGptChatHandler } from "../AiControllers/GptChatController.js";
 import {
   createHeartAnalysisHandler,
   createHeartUrineAnalysisHandler,
   createUrineAnalysisHandler
-} from "../Controllers/HeartUrineController.js";
-import { createUltrasoundAnalysisHandler } from "../Controllers/UltrasoundController.js";
-import { createExerciseAssessmentHandler } from "../Controllers/ExerciseAssessmentController.js";
-import { createDietAssessmentHandler } from "../Controllers/DietAssessmentController.js";
-import { createAnsAssessmentHandler } from "../Controllers/AnsAssessmentController.js";
-import { createArterialHealthHandler } from "../Controllers/ArterialHealthController.js";
-import { createLungFunctionHandler } from "../Controllers/LungFunctionController.js";
-import { createLiverHealthHandler } from "../Controllers/LiverHealthController.js";
-import { createEyeHealthHandler } from "../Controllers/EyeHealthController.js";
-import { createKidneyHealthHandler } from "../Controllers/KidneyHealthController.js";
-import { createDiabetesRiskHandler } from "../Controllers/DiabetesRiskController.js";
-import { createWomenHealthHandler } from "../Controllers/WomenHealthController.js";
-import { createBoneHealthHandler } from "../Controllers/BoneHealthController.js";
-import { createAdultVaccinationHandler } from "../Controllers/AdultVaccinationController.js";
-import { createCancerScreeningHandler } from "../Controllers/CancerScreeningController.js";
-import { createGenesHealthHandler } from "../Controllers/GenesHealthController.js";
-import { createAllergyPanelsHandler } from "../Controllers/AllergyPanelsController.js";
-import { createBrainHealthAssessmentHandler } from "../Controllers/BrainHealthAssessmentController.js";
+} from "../AiControllers/HeartUrineController.js";
+import { createUltrasoundAnalysisHandler } from "../AiControllers/UltrasoundController.js";
+import { createExerciseAssessmentHandler } from "../AiControllers/ExerciseAssessmentController.js";
+import { createDietAssessmentHandler } from "../AiControllers/DietAssessmentController.js";
+import { createAnsAssessmentHandler } from "../AiControllers/AnsAssessmentController.js";
+import { createArterialHealthHandler } from "../AiControllers/ArterialHealthController.js";
+import { createLungFunctionHandler } from "../AiControllers/LungFunctionController.js";
+import { createLiverHealthHandler } from "../AiControllers/LiverHealthController.js";
+import { createEyeHealthHandler } from "../AiControllers/EyeHealthController.js";
+import { createKidneyHealthHandler } from "../AiControllers/KidneyHealthController.js";
+import { createDiabetesRiskHandler } from "../AiControllers/DiabetesRiskController.js";
+import { createWomenHealthHandler } from "../AiControllers/WomenHealthController.js";
+import { createBoneHealthHandler } from "../AiControllers/BoneHealthController.js";
+import { createAdultVaccinationHandler } from "../AiControllers/AdultVaccinationController.js";
+import { createCancerScreeningHandler } from "../AiControllers/CancerScreeningController.js";
+import { createGenesHealthHandler } from "../AiControllers/GenesHealthController.js";
+import { createAllergyPanelsHandler } from "../AiControllers/AllergyPanelsController.js";
+import { createBrainHealthAssessmentHandler } from "../AiControllers/BrainHealthAssessmentController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
