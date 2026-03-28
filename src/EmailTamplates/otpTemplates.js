@@ -30,18 +30,23 @@ function getRoleContent(role) {
   return ROLE_COPY[role] || ROLE_COPY.patient;
 }
 
-export function buildLoginOtpTemplate({ name, otp, role, expiryMinutes }) {
+function buildOtpTemplate({ name, otp, role, expiryMinutes, heading, intro, actionLabel, badgeSuffix }) {
   const profile = getRoleContent(role);
   const displayName = typeof name === "string" && name.trim() ? name.trim() : "User";
   const safeOtp = String(otp || "").trim();
   const minutes = Number.isFinite(Number(expiryMinutes)) ? Number(expiryMinutes) : 10;
+  const safeHeading = typeof heading === "string" && heading.trim() ? heading.trim() : profile.heading;
+  const safeIntro = typeof intro === "string" && intro.trim() ? intro.trim() : profile.intro;
+  const safeActionLabel = typeof actionLabel === "string" && actionLabel.trim() ? actionLabel.trim() : "account verification";
+  const safeBadgeSuffix = typeof badgeSuffix === "string" && badgeSuffix.trim() ? badgeSuffix.trim() : "OTP";
 
   const text = [
     `Hello ${displayName},`,
-    profile.intro,
+    safeIntro,
     `Your one-time password is ${safeOtp}.`,
     `This code expires in ${minutes} minutes.`,
-    "If you did not request this login, please contact your hospital administrator immediately."
+    `Use this code to complete your ${safeActionLabel}.`,
+    "If you did not request this action, please contact your hospital administrator immediately."
   ].join("\n");
 
   const html = `
@@ -49,15 +54,15 @@ export function buildLoginOtpTemplate({ name, otp, role, expiryMinutes }) {
       <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:24px;overflow:hidden">
         <div style="padding:28px 32px;background:${profile.accent}">
           <div style="display:inline-block;padding:8px 14px;border-radius:999px;background:rgba(255,255,255,0.18);font-size:12px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#ffffff">
-            ${profile.badge}
+            ${profile.badge} · ${safeBadgeSuffix}
           </div>
-          <h1 style="margin:18px 0 8px;font-size:28px;line-height:1.2;color:#ffffff">${profile.heading}</h1>
-          <p style="margin:0;font-size:15px;line-height:1.7;color:rgba(255,255,255,0.92)">${profile.intro}</p>
+          <h1 style="margin:18px 0 8px;font-size:28px;line-height:1.2;color:#ffffff">${safeHeading}</h1>
+          <p style="margin:0;font-size:15px;line-height:1.7;color:rgba(255,255,255,0.92)">${safeIntro}</p>
         </div>
         <div style="padding:32px">
           <p style="margin:0 0 16px;font-size:16px;line-height:1.7;color:#0f172a">Hello ${displayName},</p>
           <p style="margin:0 0 24px;font-size:15px;line-height:1.8;color:#334155">
-            Please use the one-time password below to complete your secure login.
+            Please use the one-time password below to complete your ${safeActionLabel}.
           </p>
           <div style="margin:0 0 24px;padding:22px 24px;border-radius:20px;background:#f8fafc;border:1px dashed ${profile.accent};text-align:center">
             <div style="font-size:13px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#64748b">One-Time Password</div>
@@ -67,7 +72,7 @@ export function buildLoginOtpTemplate({ name, otp, role, expiryMinutes }) {
             This OTP will expire in <strong>${minutes} minutes</strong>.
           </div>
           <p style="margin:24px 0 0;font-size:14px;line-height:1.8;color:#475569">
-            If you did not request this login, please contact your hospital administrator immediately.
+            If you did not request this action, please contact your hospital administrator immediately.
           </p>
         </div>
       </div>
@@ -75,9 +80,47 @@ export function buildLoginOtpTemplate({ name, otp, role, expiryMinutes }) {
   `;
 
   return {
-    subject: `${profile.badge} OTP for login`,
+    subject: `${profile.badge} ${safeBadgeSuffix}`,
     text,
     html
   };
 }
 
+export function buildLoginOtpTemplate({ name, otp, role, expiryMinutes }) {
+  return buildOtpTemplate({
+    name,
+    otp,
+    role,
+    expiryMinutes,
+    heading: getRoleContent(role).heading,
+    intro: getRoleContent(role).intro,
+    actionLabel: "secure login",
+    badgeSuffix: "OTP for login"
+  });
+}
+
+export function buildAccountUpdateOtpTemplate({ name, otp, role, expiryMinutes, actionType }) {
+  if (actionType === "email") {
+    return buildOtpTemplate({
+      name,
+      otp,
+      role,
+      expiryMinutes,
+      heading: "Verify your email change request",
+      intro: "Use this OTP to confirm that you want to update the email address for your account.",
+      actionLabel: "email update request",
+      badgeSuffix: "OTP for email update"
+    });
+  }
+
+  return buildOtpTemplate({
+    name,
+    otp,
+    role,
+    expiryMinutes,
+    heading: "Verify your password change request",
+    intro: "Use this OTP to confirm that you want to change the password for your account.",
+    actionLabel: "password change request",
+    badgeSuffix: "OTP for password update"
+  });
+}

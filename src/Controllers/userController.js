@@ -2,11 +2,39 @@ import { User, USER_ROLES_ENUM, USER_STATUSES_ENUM } from "../Models/User.js";
 import { DoctorProfile } from "../Models/DoctorProfile.js";
 import { NurseProfile } from "../Models/NurseProfile.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
+import { createUserNotification } from "./notificationController.js";
+import { buildPromptSections, generateGptJson } from "../utils/gptService.js";
+import { sendAdminCustomEmail, sendUserActiveEmail, sendUserBlockedEmail, sendUserOnboardingEmail } from "../utils/emailService.js";
 import { canCreateUser } from "../utils/permissions.js";
+import {
+  buildUserActiveWhatsappMessage,
+  buildUserBlockedWhatsappMessage,
+  buildUserOnboardingWhatsappMessage,
+  sendWhatsappMessage
+} from "../utils/Whatsapp.js";
+
+const EMAIL_ATTACHMENT_LIMIT = 5;
+const EMAIL_ATTACHMENT_SIZE_LIMIT = 10 * 1024 * 1024;
+const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+]);
 
 function buildUserResponse(user) {
   return {
     id: user._id.toString(),
+    userNumber: user.userNumber ?? null,
     name: user.name,
     email: user.email,
     role: user.role,
@@ -16,6 +44,434 @@ function buildUserResponse(user) {
     updatedAt: user.updatedAt,
     lastLoginAt: user.lastLoginAt || null
   };
+}
+
+function createRequestError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function buildCareTeamMemberResponse(user) {
+  if (!user?._id) return null;
+
+  return {
+    id: user._id.toString(),
+    userNumber: user.userNumber ?? null,
+    name: user.name,
+    email: user.email,
+    phone: user.phone || "",
+    status: user.status
+  };
+}
+
+async function buildUsersResponse(users) {
+  const normalizedUsers = Array.isArray(users) ? users : [];
+  const nurseUserIds = normalizedUsers.filter((user) => user?.role === "nurse").map((user) => user._id);
+  const patientUserIds = normalizedUsers.filter((user) => user?.role === "patient").map((user) => user._id);
+
+  if (nurseUserIds.length === 0 && patientUserIds.length === 0) {
+    return normalizedUsers.map((user) => buildUserResponse(user));
+  }
+
+  const [nurseProfiles, patientProfiles] = await Promise.all([
+    nurseUserIds.length > 0
+      ? NurseProfile.find({ user: { $in: nurseUserIds } })
+          .populate("assignedDoctor", "name email phone status userNumber")
+          .lean()
+      : [],
+    patientUserIds.length > 0
+      ? PatientProfile.find({ user: { $in: patientUserIds } })
+          .populate("assignedDoctors", "name email phone status userNumber")
+          .populate("assignedNurses", "name email phone status userNumber")
+          .lean()
+      : []
+  ]);
+
+  const assignmentByUserId = new Map(
+    nurseProfiles.map((profile) => [profile.user.toString(), buildCareTeamMemberResponse(profile.assignedDoctor)])
+  );
+  const patientAssignmentsByUserId = new Map(
+    patientProfiles.map((profile) => [
+      profile.user.toString(),
+      {
+        assignedDoctors: Array.isArray(profile.assignedDoctors)
+          ? profile.assignedDoctors.map((doctor) => buildCareTeamMemberResponse(doctor)).filter(Boolean)
+          : [],
+        assignedNurses: Array.isArray(profile.assignedNurses)
+          ? profile.assignedNurses.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean)
+          : []
+      }
+    ])
+  );
+
+  return normalizedUsers.map((user) => ({
+    ...buildUserResponse(user),
+    assignedDoctor: user.role === "nurse" ? assignmentByUserId.get(user._id.toString()) || null : null,
+    assignedDoctors: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.assignedDoctors || [] : [],
+    assignedNurses: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.assignedNurses || [] : []
+  }));
+}
+
+function buildPatientManagementResponse({ profile, managedDoctor }) {
+  const user = profile?.user;
+  if (!user?._id) return null;
+
+  const assignedDoctors = Array.isArray(profile.assignedDoctors)
+    ? profile.assignedDoctors.map((doctor) => buildCareTeamMemberResponse(doctor)).filter(Boolean)
+    : [];
+  const assignedNurses = Array.isArray(profile.assignedNurses)
+    ? profile.assignedNurses.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean)
+    : [];
+  const nextAppointmentAt = profile?.nextAppointmentAt || null;
+  const followUpDueAt = profile?.followUpDueAt || null;
+  let priority = profile?.priority || "medium";
+
+  if (followUpDueAt && new Date(followUpDueAt).getTime() < Date.now() && (priority === "low" || priority === "medium")) {
+    priority = "high";
+  }
+
+  return {
+    ...buildUserResponse(user),
+    priority,
+    assignedDoctors,
+    assignedNurses,
+    managedDoctor: buildCareTeamMemberResponse(managedDoctor),
+    lastInteractionAt: profile?.lastInteractionAt || user?.updatedAt || profile?.updatedAt || user?.createdAt || null,
+    nextAppointmentAt,
+    followUpDueAt
+  };
+}
+
+function buildPatientManagementSummary(patients) {
+  const normalizedPatients = Array.isArray(patients) ? patients : [];
+  const now = Date.now();
+
+  return normalizedPatients.reduce(
+    (summary, patient) => {
+      summary.total += 1;
+
+      if (patient?.status === "active") summary.active += 1;
+      if (patient?.status === "blocked") summary.blocked += 1;
+      if (patient?.followUpDueAt && new Date(patient.followUpDueAt).getTime() <= now) summary.followUpDue += 1;
+      if (patient?.nextAppointmentAt) summary.upcomingAppointments += 1;
+
+      const priorityKey = ["low", "medium", "high", "critical"].includes(patient?.priority) ? patient.priority : "medium";
+      summary.priority[priorityKey] += 1;
+
+      return summary;
+    },
+    {
+      total: 0,
+      active: 0,
+      blocked: 0,
+      followUpDue: 0,
+      upcomingAppointments: 0,
+      priority: {
+        low: 0,
+        medium: 0,
+        high: 0,
+        critical: 0
+      }
+    }
+  );
+}
+
+function matchesPatientManagementSearch(patient, search) {
+  const normalizedSearch = typeof search === "string" ? search.trim().toLowerCase() : "";
+  if (!normalizedSearch) return true;
+
+  const haystacks = [
+    patient?.name,
+    patient?.email,
+    patient?.phone,
+    patient?.userNumber != null ? String(patient.userNumber) : "",
+    ...(Array.isArray(patient?.assignedDoctors) ? patient.assignedDoctors.map((doctor) => doctor?.name || "") : []),
+    ...(Array.isArray(patient?.assignedNurses) ? patient.assignedNurses.map((nurse) => nurse?.name || "") : [])
+  ];
+
+  return haystacks.some((value) => typeof value === "string" && value.toLowerCase().includes(normalizedSearch));
+}
+
+async function findDoctorUserById(doctorId) {
+  const normalizedDoctorId = typeof doctorId === "string" ? doctorId.trim() : "";
+
+  if (!normalizedDoctorId) {
+    throw createRequestError("assignedDoctorId is required for nurse users");
+  }
+
+  if (!/^[a-f\d]{24}$/i.test(normalizedDoctorId)) {
+    throw createRequestError("Invalid assignedDoctorId");
+  }
+
+  const doctor = await User.findOne({ _id: normalizedDoctorId, role: "doctor" }).lean();
+  if (!doctor) {
+    throw createRequestError("Selected assigned doctor was not found");
+  }
+
+  return doctor;
+}
+
+async function resolveAssignedDoctorForNurse({ creator, creatorRole, assignedDoctorId }) {
+  if (creatorRole === "doctor") {
+    const creatorId = creator?._id?.toString?.() || "";
+    const normalizedAssignedDoctorId = typeof assignedDoctorId === "string" ? assignedDoctorId.trim() : "";
+
+    if (normalizedAssignedDoctorId && normalizedAssignedDoctorId !== creatorId) {
+      throw createRequestError("Doctor can only assign nurses to their own account", 403);
+    }
+
+    const doctor = await User.findOne({ _id: creator?._id, role: "doctor" }).lean();
+    if (!doctor) {
+      throw createRequestError("Doctor account not found for nurse assignment", 404);
+    }
+
+    return doctor;
+  }
+
+  return findDoctorUserById(assignedDoctorId);
+}
+
+function normalizeTextField(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseIdArrayField(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string") return [];
+
+  const normalizedValue = value.trim();
+  if (!normalizedValue) return [];
+
+  try {
+    const parsedValue = JSON.parse(normalizedValue);
+    return Array.isArray(parsedValue) ? parsedValue : [normalizedValue];
+  } catch {
+    return normalizedValue.split(",");
+  }
+}
+
+function normalizeIdArray(value) {
+  const values = parseIdArrayField(value);
+
+  return Array.from(
+    new Set(
+      values
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+    )
+  );
+}
+
+async function findUsersByIdsAndRole(userIds, role, fieldName) {
+  const normalizedIds = normalizeIdArray(userIds);
+
+  for (const userId of normalizedIds) {
+    if (!/^[a-f\d]{24}$/i.test(userId)) {
+      throw createRequestError(`Invalid ${fieldName}`);
+    }
+  }
+
+  if (normalizedIds.length === 0) {
+    return [];
+  }
+
+  const users = await User.find({ _id: { $in: normalizedIds }, role }).lean();
+  if (users.length !== normalizedIds.length) {
+    throw createRequestError(`One or more selected ${role}s were not found`);
+  }
+
+  const usersById = new Map(users.map((user) => [user._id.toString(), user]));
+  return normalizedIds.map((userId) => usersById.get(userId)).filter(Boolean);
+}
+
+async function resolvePatientCareTeam({ creator, creatorRole, assignedDoctorIds, assignedNurseIds }) {
+  const doctorIds = normalizeIdArray(assignedDoctorIds);
+  const nurseIds = normalizeIdArray(assignedNurseIds);
+  const creatorId = creator?._id?.toString?.() || "";
+
+  if (creatorRole === "doctor" && creatorId) {
+    doctorIds.push(creatorId);
+  }
+
+  if (creatorRole === "nurse" && creatorId) {
+    nurseIds.push(creatorId);
+  }
+
+  const doctors = await findUsersByIdsAndRole(doctorIds, "doctor", "assignedDoctorIds");
+  const nurses = await findUsersByIdsAndRole(nurseIds, "nurse", "assignedNurseIds");
+
+  if (doctors.length === 0) {
+    throw createRequestError("At least one assigned doctor is required for patient users");
+  }
+
+  if (nurses.length === 0) {
+    throw createRequestError("At least one assigned nurse is required for patient users");
+  }
+
+  return {
+    doctors,
+    nurses,
+    assignedDoctorIds: doctors.map((doctor) => doctor._id),
+    assignedNurseIds: nurses.map((nurse) => nurse._id)
+  };
+}
+
+function getEmailAttachments(req) {
+  const files = Array.isArray(req?.files) ? req.files : [];
+  return files.map((file) => ({
+    filename: file.originalname,
+    content: file.buffer,
+    contentType: file.mimetype
+  }));
+}
+
+async function generateAiEmailDraft({ user, prompt, tone, extraInstructions }) {
+  const roleLabel = typeof user?.role === "string" ? user.role.replace(/_/g, " ") : "user";
+  const promptText = normalizeTextField(prompt);
+  if (!promptText) {
+    throw new Error("prompt is required");
+  }
+
+  const system = [
+    "You write professional hospital admin emails.",
+    "Return only valid JSON with keys subject, summary, message.",
+    "summary must be one short sentence.",
+    "message must be plain text with paragraphs separated by blank lines.",
+    "Keep the tone clear, polite, and suitable for medical administration."
+  ].join(" ");
+
+  const userPrompt = buildPromptSections([
+    { label: "Recipient name", value: user?.name || "User" },
+    { label: "Recipient role", value: roleLabel },
+    { label: "Recipient email", value: user?.email || "Not available" },
+    { label: "Recipient user ID", value: user?.userNumber ? String(user.userNumber) : "Not assigned" },
+    { label: "Requested tone", value: normalizeTextField(tone) || "professional" },
+    normalizeTextField(extraInstructions) ? { label: "Extra instructions", value: normalizeTextField(extraInstructions) } : null,
+    { label: "Request", value: promptText }
+  ]);
+
+  const response = await generateGptJson({
+    systemPrompt: system,
+    userPrompt,
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature: 0.6
+  });
+
+  const subject = normalizeTextField(response.data.subject) || "Account update";
+  const summary = normalizeTextField(response.data.summary) || "Please review this important update from the Dr Harsha admin panel.";
+  const message = normalizeTextField(response.data.message) || "Hello,\n\nPlease review this important update.\n\nThank you.";
+
+  return { subject, summary, message };
+}
+
+function normalizeNotificationResult(result, defaultStatus = "sent") {
+  if (result.status === "fulfilled") {
+    return result.value?.status ? result.value : { status: defaultStatus };
+  }
+
+  return {
+    status: "failed",
+    reason: result.reason instanceof Error ? result.reason.message : "Notification failed"
+  };
+}
+
+function buildNotificationSummary(emailResult, whatsappResult) {
+  const notifications = {
+    email: normalizeNotificationResult(emailResult),
+    whatsapp: normalizeNotificationResult(whatsappResult)
+  };
+
+  const notificationWarnings = Object.entries(notifications)
+    .filter(([, value]) => value.status !== "sent")
+    .map(([channel, value]) => `${channel}: ${value.reason || value.status}`);
+
+  return { notifications, notificationWarnings };
+}
+
+async function sendOnboardingNotifications(user) {
+  const [emailResult, whatsappResult] = await Promise.allSettled([
+    sendUserOnboardingEmail({
+      toEmail: user.email,
+      name: user.name,
+      role: user.role,
+      phone: user.phone,
+      userNumber: user.userNumber
+    }),
+    sendWhatsappMessage({
+      toPhone: user.phone,
+      message: buildUserOnboardingWhatsappMessage({
+        name: user.name,
+        role: user.role,
+        email: user.email,
+        userNumber: user.userNumber
+      }),
+      templateType: "user_onboarding",
+      meta: {
+        userId: user._id.toString(),
+        role: user.role,
+        userNumber: user.userNumber
+      }
+    })
+  ]);
+
+  return buildNotificationSummary(emailResult, whatsappResult);
+}
+
+async function sendBlockedNotifications(user) {
+  const [emailResult, whatsappResult] = await Promise.allSettled([
+    sendUserBlockedEmail({
+      toEmail: user.email,
+      name: user.name,
+      role: user.role,
+      phone: user.phone,
+      userNumber: user.userNumber
+    }),
+    sendWhatsappMessage({
+      toPhone: user.phone,
+      message: buildUserBlockedWhatsappMessage({
+        name: user.name,
+        role: user.role,
+        userNumber: user.userNumber
+      }),
+      templateType: "user_blocked",
+      meta: {
+        userId: user._id.toString(),
+        role: user.role,
+        userNumber: user.userNumber
+      }
+    })
+  ]);
+
+  return buildNotificationSummary(emailResult, whatsappResult);
+}
+
+async function sendActiveNotifications(user) {
+  const [emailResult, whatsappResult] = await Promise.allSettled([
+    sendUserActiveEmail({
+      toEmail: user.email,
+      name: user.name,
+      role: user.role,
+      phone: user.phone,
+      userNumber: user.userNumber
+    }),
+    sendWhatsappMessage({
+      toPhone: user.phone,
+      message: buildUserActiveWhatsappMessage({
+        name: user.name,
+        role: user.role,
+        userNumber: user.userNumber
+      }),
+      templateType: "user_active",
+      meta: {
+        userId: user._id.toString(),
+        role: user.role,
+        userNumber: user.userNumber
+      }
+    })
+  ]);
+
+  return buildNotificationSummary(emailResult, whatsappResult);
 }
 
 export async function createUserController(req, res) {
@@ -31,6 +487,9 @@ export async function createUserController(req, res) {
     const role = typeof req?.body?.role === "string" ? req.body.role.trim() : "";
     const phone = typeof req?.body?.phone === "string" ? req.body.phone.trim() : "";
     const status = typeof req?.body?.status === "string" ? req.body.status.trim() : "active";
+    const assignedDoctorId = typeof req?.body?.assignedDoctorId === "string" ? req.body.assignedDoctorId.trim() : "";
+    const assignedDoctorIds = req?.body?.assignedDoctorIds;
+    const assignedNurseIds = req?.body?.assignedNurseIds;
 
     if (!name || !email || !password || !role) {
       return res.status(400).json({ error: "name, email, password, role are required" });
@@ -45,19 +504,51 @@ export async function createUserController(req, res) {
     const exists = await User.findOne({ email }).lean();
     if (exists) return res.status(409).json({ error: "Email already exists" });
 
+    const assignedDoctor = role === "nurse" ? await resolveAssignedDoctorForNurse({ creator, creatorRole, assignedDoctorId }) : null;
+    const patientCareTeam =
+      role === "patient" ? await resolvePatientCareTeam({ creator, creatorRole, assignedDoctorIds, assignedNurseIds }) : null;
+
     const user = await User.create({ name, email, password, role, phone, status });
 
     const createdBy = creator?._id || null;
     if (role === "doctor") await DoctorProfile.create({ user: user._id, createdBy });
-    if (role === "nurse") await NurseProfile.create({ user: user._id, createdBy });
-    if (role === "patient") await PatientProfile.create({ user: user._id, createdBy });
+    if (role === "nurse") await NurseProfile.create({ user: user._id, createdBy, assignedDoctor: assignedDoctor?._id || null });
+    if (role === "patient") {
+      await PatientProfile.create({
+        user: user._id,
+        createdBy,
+        assignedDoctors: patientCareTeam?.assignedDoctorIds || [],
+        assignedNurses: patientCareTeam?.assignedNurseIds || []
+      });
+    }
+    const { notifications, notificationWarnings } = await sendOnboardingNotifications(user);
+    await createUserNotification({
+      userId: user._id,
+      createdBy,
+      type: "account_created",
+      title: "Account created",
+      message: `Your ${user.role.replace(/_/g, " ")} account has been created successfully.`,
+      metadata: {
+        role: user.role,
+        userNumber: user.userNumber
+      }
+    });
 
     return res.status(201).json({
-      user: buildUserResponse(user)
+      message: notificationWarnings.length === 0 ? "User created and onboarding notifications sent." : "User created. Some onboarding notifications could not be delivered.",
+      notifications,
+      notificationWarnings,
+      user: {
+        ...buildUserResponse(user),
+        assignedDoctor: assignedDoctor ? buildCareTeamMemberResponse(assignedDoctor) : null,
+        assignedDoctors: patientCareTeam?.doctors?.map((doctor) => buildCareTeamMemberResponse(doctor)).filter(Boolean) || [],
+        assignedNurses: patientCareTeam?.nurses?.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean) || []
+      }
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to create user";
-    return res.status(500).json({ error: message });
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    return res.status(statusCode).json({ error: message });
   }
 }
 
@@ -67,28 +558,121 @@ export async function listUsersController(req, res) {
 
     const requestedRole = typeof req?.query?.role === "string" ? req.query.role.trim() : "";
     const search = typeof req?.query?.search === "string" ? req.query.search.trim() : "";
+    const requesterRole = typeof req?.user?.role === "string" ? req.user.role : "";
+    const allowedRolesByRequester = {
+      super_admin: USER_ROLES_ENUM,
+      doctor: ["doctor", "nurse"],
+      nurse: ["doctor", "nurse"],
+      patient: []
+    };
+    const allowedRoles = allowedRolesByRequester[requesterRole] || [];
 
     if (requestedRole && !USER_ROLES_ENUM.includes(requestedRole)) {
       return res.status(400).json({ error: "Invalid role" });
     }
+    if (requestedRole && !allowedRoles.includes(requestedRole)) {
+      return res.status(403).json({ error: "Permission denied" });
+    }
+    if (!requestedRole && requesterRole !== "super_admin") {
+      return res.status(403).json({ error: "Role is required" });
+    }
 
     const query = {};
-    if (requestedRole) query.role = requestedRole;
+    if (requestedRole) {
+      query.role = requestedRole;
+    } else if (requesterRole !== "super_admin") {
+      query.role = { $in: allowedRoles };
+    }
     if (search) {
-      query.$or = [
+      const searchClauses = [
         { name: { $regex: search, $options: "i" } },
         { email: { $regex: search, $options: "i" } },
         { phone: { $regex: search, $options: "i" } }
       ];
+
+      if (/^\d+$/.test(search)) {
+        searchClauses.push({ userNumber: Number(search) });
+      }
+
+      query.$or = searchClauses;
     }
 
     const users = await User.find(query).sort({ createdAt: -1 }).lean();
 
     return res.json({
-      users: users.map((user) => buildUserResponse(user))
+      users: await buildUsersResponse(users)
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to fetch users";
+    return res.status(500).json({ error: message });
+  }
+}
+
+export async function listNursePatientManagementController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const nurseId = req?.user?._id;
+    const search = typeof req?.query?.search === "string" ? req.query.search.trim() : "";
+    const status = typeof req?.query?.status === "string" ? req.query.status.trim() : "";
+    const priority = typeof req?.query?.priority === "string" ? req.query.priority.trim().toLowerCase() : "";
+
+    if (!nurseId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    if (status && !USER_STATUSES_ENUM.includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    if (priority && !["low", "medium", "high", "critical"].includes(priority)) {
+      return res.status(400).json({ error: "Invalid priority" });
+    }
+
+    const nurseProfile = await NurseProfile.findOne({ user: nurseId })
+      .populate("assignedDoctor", "name email phone status userNumber")
+      .lean();
+
+    const managedDoctor = nurseProfile?.assignedDoctor || null;
+
+    if (!managedDoctor?._id) {
+      return res.json({
+        patients: [],
+        summary: buildPatientManagementSummary([]),
+        context: {
+          nurseId: nurseId.toString(),
+          managedDoctor: null
+        }
+      });
+    }
+
+    const patientProfiles = await PatientProfile.find({
+      assignedDoctors: managedDoctor._id,
+      assignedNurses: nurseId
+    })
+      .populate("user", "name email role phone status userNumber createdAt updatedAt lastLoginAt")
+      .populate("assignedDoctors", "name email phone status userNumber")
+      .populate("assignedNurses", "name email phone status userNumber")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const patients = patientProfiles
+      .map((profile) => buildPatientManagementResponse({ profile, managedDoctor }))
+      .filter(Boolean)
+      .filter((patient) => matchesPatientManagementSearch(patient, search))
+      .filter((patient) => (!status ? true : patient.status === status))
+      .filter((patient) => (!priority ? true : patient.priority === priority));
+
+    return res.json({
+      patients,
+      summary: buildPatientManagementSummary(patients),
+      context: {
+        nurseId: nurseId.toString(),
+        managedDoctor: buildCareTeamMemberResponse(managedDoctor)
+      }
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to fetch nurse patients";
     return res.status(500).json({ error: message });
   }
 }
@@ -103,6 +687,12 @@ export async function updateUserController(req, res) {
     const name = typeof req?.body?.name === "string" ? req.body.name.trim() : undefined;
     const phone = typeof req?.body?.phone === "string" ? req.body.phone.trim() : undefined;
     const status = typeof req?.body?.status === "string" ? req.body.status.trim() : undefined;
+    const hasAssignedDoctorId = Object.prototype.hasOwnProperty.call(req?.body || {}, "assignedDoctorId");
+    const assignedDoctorId = typeof req?.body?.assignedDoctorId === "string" ? req.body.assignedDoctorId.trim() : "";
+    const hasAssignedDoctorIds = Object.prototype.hasOwnProperty.call(req?.body || {}, "assignedDoctorIds");
+    const hasAssignedNurseIds = Object.prototype.hasOwnProperty.call(req?.body || {}, "assignedNurseIds");
+    const assignedDoctorIds = req?.body?.assignedDoctorIds;
+    const assignedNurseIds = req?.body?.assignedNurseIds;
 
     if (status && !USER_STATUSES_ENUM.includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
@@ -111,6 +701,7 @@ export async function updateUserController(req, res) {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ error: "User not found" });
     if (user.role === "super_admin") return res.status(403).json({ error: "Super admin cannot be edited here" });
+    const previousStatus = user.status;
 
     let hasChanges = false;
 
@@ -129,17 +720,186 @@ export async function updateUserController(req, res) {
       hasChanges = true;
     }
 
+    if (user.role === "nurse" && hasAssignedDoctorId) {
+      const assignedDoctor = await findDoctorUserById(assignedDoctorId);
+      await NurseProfile.findOneAndUpdate(
+        { user: user._id },
+        { $set: { assignedDoctor: assignedDoctor._id } },
+        { upsert: true, new: true }
+      );
+      hasChanges = true;
+    }
+
+    if (user.role === "patient" && (hasAssignedDoctorIds || hasAssignedNurseIds)) {
+      const existingProfile = await PatientProfile.findOne({ user: user._id }).lean();
+      const patientCareTeam = await resolvePatientCareTeam({
+        creator: req.user,
+        creatorRole: typeof req?.user?.role === "string" ? req.user.role : "",
+        assignedDoctorIds: hasAssignedDoctorIds
+          ? assignedDoctorIds
+          : Array.isArray(existingProfile?.assignedDoctors)
+            ? existingProfile.assignedDoctors.map((doctorId) => doctorId.toString())
+            : [],
+        assignedNurseIds: hasAssignedNurseIds
+          ? assignedNurseIds
+          : Array.isArray(existingProfile?.assignedNurses)
+            ? existingProfile.assignedNurses.map((nurseId) => nurseId.toString())
+            : []
+      });
+
+      await PatientProfile.findOneAndUpdate(
+        { user: user._id },
+        {
+          $set: {
+            assignedDoctors: patientCareTeam.assignedDoctorIds,
+            assignedNurses: patientCareTeam.assignedNurseIds
+          }
+        },
+        { upsert: true, new: true }
+      );
+      hasChanges = true;
+    }
+
     if (!hasChanges) {
       return res.status(400).json({ error: "No valid fields to update" });
     }
 
     await user.save();
+    let notifications = null;
+    let notificationWarnings = [];
+    let message = "User updated successfully.";
+
+    if (previousStatus !== "blocked" && user.status === "blocked") {
+      await createUserNotification({
+        userId: user._id,
+        createdBy: req?.user?._id || null,
+        type: "account_blocked",
+        title: "Account blocked",
+        message: "Your account access has been blocked by an administrator."
+      });
+      const blockedNotifications = await sendBlockedNotifications(user);
+      notifications = blockedNotifications.notifications;
+      notificationWarnings = blockedNotifications.notificationWarnings;
+      message =
+        notificationWarnings.length === 0
+          ? "User updated and blocked notifications sent."
+          : "User updated, but some blocked notifications could not be delivered.";
+    } else if (previousStatus === "blocked" && user.status === "active") {
+      await createUserNotification({
+        userId: user._id,
+        createdBy: req?.user?._id || null,
+        type: "account_active",
+        title: "Account activated",
+        message: "Your account access has been restored by an administrator."
+      });
+      const activeNotifications = await sendActiveNotifications(user);
+      notifications = activeNotifications.notifications;
+      notificationWarnings = activeNotifications.notificationWarnings;
+      message =
+        notificationWarnings.length === 0
+          ? "User updated and active notifications sent."
+          : "User updated, but some active notifications could not be delivered.";
+    }
 
     return res.json({
-      user: buildUserResponse(user)
+      message,
+      notifications,
+      notificationWarnings,
+      user: (await buildUsersResponse([user]))[0]
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to update user";
-    return res.status(500).json({ error: message });
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    return res.status(statusCode).json({ error: message });
   }
+}
+
+export async function sendUserEmailController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const userId = typeof req?.params?.userId === "string" ? req.params.userId.trim() : "";
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    const subject = normalizeTextField(req?.body?.subject);
+    const message = normalizeTextField(req?.body?.message);
+    const summary = normalizeTextField(req?.body?.summary);
+
+    if (!subject) return res.status(400).json({ error: "subject is required" });
+    if (!message) return res.status(400).json({ error: "message is required" });
+
+    const user = await User.findById(userId);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (!user.email) return res.status(400).json({ error: "Selected user does not have an email address" });
+
+    const attachments = getEmailAttachments(req);
+
+    await sendAdminCustomEmail({
+      toEmail: user.email,
+      name: user.name,
+      role: user.role,
+      subject,
+      message,
+      summary,
+      userNumber: user.userNumber,
+      attachments
+    });
+
+    return res.json({
+      message: attachments.length > 0 ? `Email sent successfully with ${attachments.length} attachment${attachments.length > 1 ? "s" : ""}.` : "Email sent successfully.",
+      attachments: attachments.map((attachment) => ({
+        filename: attachment.filename,
+        contentType: attachment.contentType
+      })),
+      user: buildUserResponse(user)
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to send email" });
+  }
+}
+
+export async function generateUserEmailDraftController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const userId = typeof req?.params?.userId === "string" ? req.params.userId.trim() : "";
+    if (!userId) return res.status(400).json({ error: "userId is required" });
+
+    const prompt = normalizeTextField(req?.body?.prompt);
+    const tone = normalizeTextField(req?.body?.tone);
+    const extraInstructions = normalizeTextField(req?.body?.extraInstructions);
+
+    if (!prompt) return res.status(400).json({ error: "prompt is required" });
+
+    const user = await User.findById(userId).lean();
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const draft = await generateAiEmailDraft({ user, prompt, tone, extraInstructions });
+
+    return res.json({
+      message: "AI email draft generated successfully.",
+      draft,
+      user: buildUserResponse(user)
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to generate email draft" });
+  }
+}
+
+export function validateUserEmailAttachments(req, res, next) {
+  const files = Array.isArray(req?.files) ? req.files : [];
+  if (files.length > EMAIL_ATTACHMENT_LIMIT) {
+    return res.status(400).json({ error: `You can attach up to ${EMAIL_ATTACHMENT_LIMIT} files.` });
+  }
+
+  for (const file of files) {
+    if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(file.mimetype)) {
+      return res.status(400).json({ error: `Unsupported attachment type: ${file.originalname}` });
+    }
+    if (typeof file.size === "number" && file.size > EMAIL_ATTACHMENT_SIZE_LIMIT) {
+      return res.status(400).json({ error: `${file.originalname} exceeds the 10 MB file size limit.` });
+    }
+  }
+
+  return next();
 }

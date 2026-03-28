@@ -1,6 +1,6 @@
 export const PERMISSIONS = {
   super_admin: { canCreate: ["doctor", "nurse", "patient"] },
-  doctor: { canCreate: ["nurse"] },
+  doctor: { canCreate: ["nurse", "patient"] },
   nurse: { canCreate: ["patient"] },
   patient: { canCreate: [] }
 };
@@ -11,4 +11,3 @@ export function canCreateUser(creatorRole, targetRole) {
   const list = Array.isArray(rules?.canCreate) ? rules.canCreate : [];
   return list.includes(targetRole);
 }
-
