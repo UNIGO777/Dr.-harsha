@@ -3,8 +3,7 @@ import { DoctorProfile } from "../Models/DoctorProfile.js";
 import { NurseProfile } from "../Models/NurseProfile.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
 import { createUserNotification } from "./notificationController.js";
-import { buildPromptSections, generateGptJson } from "../utils/gptService.js";
-import { sendAdminCustomEmail, sendUserActiveEmail, sendUserBlockedEmail, sendUserOnboardingEmail } from "../utils/emailService.js";
+import { sendUserActiveEmail, sendUserBlockedEmail, sendUserOnboardingEmail } from "../utils/emailService.js";
 import { canCreateUser } from "../utils/permissions.js";
 import {
   buildUserActiveWhatsappMessage,
@@ -12,24 +11,6 @@ import {
   buildUserOnboardingWhatsappMessage,
   sendWhatsappMessage
 } from "../utils/Whatsapp.js";
-
-const EMAIL_ATTACHMENT_LIMIT = 5;
-const EMAIL_ATTACHMENT_SIZE_LIMIT = 10 * 1024 * 1024;
-const ALLOWED_ATTACHMENT_MIME_TYPES = new Set([
-  "application/pdf",
-  "text/plain",
-  "text/csv",
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-]);
 
 function buildUserResponse(user) {
   return {
@@ -64,6 +45,7 @@ function buildCareTeamMemberResponse(user) {
     status: user.status
   };
 }
+
 
 async function buildUsersResponse(users) {
   const normalizedUsers = Array.isArray(users) ? users : [];
@@ -232,10 +214,6 @@ async function resolveAssignedDoctorForNurse({ creator, creatorRole, assignedDoc
   return findDoctorUserById(assignedDoctorId);
 }
 
-function normalizeTextField(value) {
-  return typeof value === "string" ? value.trim() : "";
-}
-
 function parseIdArrayField(value) {
   if (Array.isArray(value)) return value;
   if (typeof value !== "string") return [];
@@ -315,54 +293,6 @@ async function resolvePatientCareTeam({ creator, creatorRole, assignedDoctorIds,
     assignedDoctorIds: doctors.map((doctor) => doctor._id),
     assignedNurseIds: nurses.map((nurse) => nurse._id)
   };
-}
-
-function getEmailAttachments(req) {
-  const files = Array.isArray(req?.files) ? req.files : [];
-  return files.map((file) => ({
-    filename: file.originalname,
-    content: file.buffer,
-    contentType: file.mimetype
-  }));
-}
-
-async function generateAiEmailDraft({ user, prompt, tone, extraInstructions }) {
-  const roleLabel = typeof user?.role === "string" ? user.role.replace(/_/g, " ") : "user";
-  const promptText = normalizeTextField(prompt);
-  if (!promptText) {
-    throw new Error("prompt is required");
-  }
-
-  const system = [
-    "You write professional hospital admin emails.",
-    "Return only valid JSON with keys subject, summary, message.",
-    "summary must be one short sentence.",
-    "message must be plain text with paragraphs separated by blank lines.",
-    "Keep the tone clear, polite, and suitable for medical administration."
-  ].join(" ");
-
-  const userPrompt = buildPromptSections([
-    { label: "Recipient name", value: user?.name || "User" },
-    { label: "Recipient role", value: roleLabel },
-    { label: "Recipient email", value: user?.email || "Not available" },
-    { label: "Recipient user ID", value: user?.userNumber ? String(user.userNumber) : "Not assigned" },
-    { label: "Requested tone", value: normalizeTextField(tone) || "professional" },
-    normalizeTextField(extraInstructions) ? { label: "Extra instructions", value: normalizeTextField(extraInstructions) } : null,
-    { label: "Request", value: promptText }
-  ]);
-
-  const response = await generateGptJson({
-    systemPrompt: system,
-    userPrompt,
-    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-    temperature: 0.6
-  });
-
-  const subject = normalizeTextField(response.data.subject) || "Account update";
-  const summary = normalizeTextField(response.data.summary) || "Please review this important update from the Dr Harsha admin panel.";
-  const message = normalizeTextField(response.data.message) || "Hello,\n\nPlease review this important update.\n\nThank you.";
-
-  return { subject, summary, message };
 }
 
 function normalizeNotificationResult(result, defaultStatus = "sent") {
@@ -812,94 +742,4 @@ export async function updateUserController(req, res) {
     const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
     return res.status(statusCode).json({ error: message });
   }
-}
-
-export async function sendUserEmailController(req, res) {
-  try {
-    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
-
-    const userId = typeof req?.params?.userId === "string" ? req.params.userId.trim() : "";
-    if (!userId) return res.status(400).json({ error: "userId is required" });
-
-    const subject = normalizeTextField(req?.body?.subject);
-    const message = normalizeTextField(req?.body?.message);
-    const summary = normalizeTextField(req?.body?.summary);
-
-    if (!subject) return res.status(400).json({ error: "subject is required" });
-    if (!message) return res.status(400).json({ error: "message is required" });
-
-    const user = await User.findById(userId);
-    if (!user) return res.status(404).json({ error: "User not found" });
-    if (!user.email) return res.status(400).json({ error: "Selected user does not have an email address" });
-
-    const attachments = getEmailAttachments(req);
-
-    await sendAdminCustomEmail({
-      toEmail: user.email,
-      name: user.name,
-      role: user.role,
-      subject,
-      message,
-      summary,
-      userNumber: user.userNumber,
-      attachments
-    });
-
-    return res.json({
-      message: attachments.length > 0 ? `Email sent successfully with ${attachments.length} attachment${attachments.length > 1 ? "s" : ""}.` : "Email sent successfully.",
-      attachments: attachments.map((attachment) => ({
-        filename: attachment.filename,
-        contentType: attachment.contentType
-      })),
-      user: buildUserResponse(user)
-    });
-  } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to send email" });
-  }
-}
-
-export async function generateUserEmailDraftController(req, res) {
-  try {
-    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
-
-    const userId = typeof req?.params?.userId === "string" ? req.params.userId.trim() : "";
-    if (!userId) return res.status(400).json({ error: "userId is required" });
-
-    const prompt = normalizeTextField(req?.body?.prompt);
-    const tone = normalizeTextField(req?.body?.tone);
-    const extraInstructions = normalizeTextField(req?.body?.extraInstructions);
-
-    if (!prompt) return res.status(400).json({ error: "prompt is required" });
-
-    const user = await User.findById(userId).lean();
-    if (!user) return res.status(404).json({ error: "User not found" });
-
-    const draft = await generateAiEmailDraft({ user, prompt, tone, extraInstructions });
-
-    return res.json({
-      message: "AI email draft generated successfully.",
-      draft,
-      user: buildUserResponse(user)
-    });
-  } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to generate email draft" });
-  }
-}
-
-export function validateUserEmailAttachments(req, res, next) {
-  const files = Array.isArray(req?.files) ? req.files : [];
-  if (files.length > EMAIL_ATTACHMENT_LIMIT) {
-    return res.status(400).json({ error: `You can attach up to ${EMAIL_ATTACHMENT_LIMIT} files.` });
-  }
-
-  for (const file of files) {
-    if (!ALLOWED_ATTACHMENT_MIME_TYPES.has(file.mimetype)) {
-      return res.status(400).json({ error: `Unsupported attachment type: ${file.originalname}` });
-    }
-    if (typeof file.size === "number" && file.size > EMAIL_ATTACHMENT_SIZE_LIMIT) {
-      return res.status(400).json({ error: `${file.originalname} exceeds the 10 MB file size limit.` });
-    }
-  }
-
-  return next();
 }
