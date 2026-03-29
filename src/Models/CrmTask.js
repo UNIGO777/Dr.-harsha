@@ -47,6 +47,12 @@ const crmTaskSchema = new mongoose.Schema(
     callOutcome: { type: String, enum: CRM_TASK_OUTCOME_ENUM, default: "pending" },
     lastCalledAt: { type: Date, default: null },
     completedAt: { type: Date, default: null },
+    responseSummary: { type: String, trim: true, default: "" },
+    patientResponse: { type: String, trim: true, default: "" },
+    nextStep: { type: String, trim: true, default: "" },
+    respondedAt: { type: Date, default: null },
+    linkedNextTask: { type: mongoose.Schema.Types.ObjectId, ref: "CrmTask", default: null },
+    linkedAppointment: { type: mongoose.Schema.Types.ObjectId, ref: "Appointment", default: null },
     notes: { type: [crmTaskNoteSchema], default: [] }
   },
   { timestamps: true }

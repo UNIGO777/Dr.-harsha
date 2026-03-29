@@ -1,9 +1,10 @@
-import { Appointment } from "../Models/Appointment.js";
+import { APPOINTMENT_STATUS_ENUM, APPOINTMENT_TYPE_ENUM, Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
 import { DoctorProfile } from "../Models/DoctorProfile.js";
 import { NurseProfile } from "../Models/NurseProfile.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
 import { User } from "../Models/User.js";
+import { sendAdminCustomEmail } from "../utils/emailService.js";
 
 const DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const DAY_LABELS = {
@@ -15,6 +16,8 @@ const DAY_LABELS = {
   saturday: "Saturday",
   sunday: "Sunday"
 };
+const ACTIVE_APPOINTMENT_STATUSES = ["scheduled", "pending", "confirmed", "checked_in"];
+const EMAIL_ACTIONS = ["reminder", "confirmation", "instructions"];
 
 function createRequestError(message, statusCode = 400) {
   const error = new Error(message);
@@ -33,6 +36,16 @@ function normalizeDate(value, fieldName) {
     throw createRequestError(`${fieldName} must be a valid date`, 400);
   }
   return parsedDate;
+}
+
+function normalizeBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalizedValue = value.trim().toLowerCase();
+    if (["true", "1", "yes"].includes(normalizedValue)) return true;
+    if (["false", "0", "no"].includes(normalizedValue)) return false;
+  }
+  return false;
 }
 
 function padTime(value) {
@@ -248,6 +261,28 @@ function formatDateKeyFromDate(dateValue) {
   return `${dateValue.getFullYear()}-${padTime(dateValue.getMonth() + 1)}-${padTime(dateValue.getDate())}`;
 }
 
+function formatDateTimeLabel(dateValue) {
+  return new Intl.DateTimeFormat("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(new Date(dateValue));
+}
+
+function formatAppointmentStatusLabel(status) {
+  return String(status || "pending")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+function formatAppointmentTypeLabel(type) {
+  return String(type || "in_person")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
 function rangeOverlaps(startA, endA, startB, endB) {
   return startA < endB && endA > startB;
 }
@@ -265,6 +300,20 @@ function buildUserOption(user) {
   };
 }
 
+function buildAppointmentNoteResponse(note) {
+  if (!note?._id || !note?.message) return null;
+
+  return {
+    id: note._id.toString(),
+    type: note.type || "note",
+    channel: note.channel || "system",
+    message: note.message,
+    metadata: note.metadata && typeof note.metadata === "object" ? note.metadata : {},
+    createdBy: buildUserOption(note.createdBy),
+    createdAt: note.createdAt || null
+  };
+}
+
 function buildAppointmentResponse(appointment) {
   if (!appointment?._id) return null;
 
@@ -274,14 +323,41 @@ function buildAppointmentResponse(appointment) {
     endsAt: appointment.endsAt || null,
     slotMinutes: appointment.slotMinutes || null,
     reason: appointment.reason,
+    appointmentType: appointment.appointmentType || "in_person",
     status: appointment.status,
     outcome: appointment.outcome || "",
+    preparationInstructions: appointment.preparationInstructions || "",
+    documentsRequired: Boolean(appointment.documentsRequired),
+    reportsRequired: Boolean(appointment.reportsRequired),
+    preVisitUpdateRequired: Boolean(appointment.preVisitUpdateRequired),
+    confirmationSentAt: appointment.confirmationSentAt || null,
+    lastReminderAt: appointment.lastReminderAt || null,
+    lastReminderType: appointment.lastReminderType || "",
+    checkedInAt: appointment.checkedInAt || null,
+    completedAt: appointment.completedAt || null,
+    cancelledAt: appointment.cancelledAt || null,
+    noShowAt: appointment.noShowAt || null,
     patient: buildUserOption(appointment.patient),
     doctor: buildUserOption(appointment.doctor),
     scheduledBy: buildUserOption(appointment.scheduledBy),
+    notes: Array.isArray(appointment.notes) ? appointment.notes.map((note) => buildAppointmentNoteResponse(note)).filter(Boolean) : [],
     createdAt: appointment.createdAt,
     updatedAt: appointment.updatedAt
   };
+}
+
+function addAppointmentNote(appointment, { type = "note", channel = "system", message, createdBy, metadata = {} }) {
+  const normalizedMessage = normalizeString(message);
+  if (!normalizedMessage || !createdBy) return;
+
+  appointment.notes.push({
+    type,
+    channel,
+    message: normalizedMessage,
+    createdBy,
+    metadata: metadata && typeof metadata === "object" ? metadata : {},
+    createdAt: new Date()
+  });
 }
 
 function buildFollowUpTaskResponse(task) {
@@ -347,6 +423,55 @@ async function findUserByRole(userId, role, fieldName) {
   return user;
 }
 
+async function getManagedDoctorForNurse(nurseId) {
+  const nurseProfile = await NurseProfile.findOne({ user: nurseId })
+    .populate("assignedDoctor", "name email phone status userNumber")
+    .lean();
+
+  if (!nurseProfile?.assignedDoctor?._id) {
+    throw createRequestError("No managed doctor linked to this nurse", 404);
+  }
+
+  return nurseProfile.assignedDoctor;
+}
+
+async function ensurePatientInNurseScope({ patientId, nurseId, managedDoctorId }) {
+  const patientProfile = await PatientProfile.findOne({
+    user: patientId,
+    assignedDoctors: managedDoctorId,
+    assignedNurses: nurseId
+  }).lean();
+
+  if (!patientProfile?._id) {
+    throw createRequestError("This patient is outside your assignment scope", 403);
+  }
+
+  return patientProfile;
+}
+
+async function syncPatientNextAppointment(patientId) {
+  if (!patientId) return;
+
+  const nextAppointment = await Appointment.findOne({
+    patient: patientId,
+    status: { $in: ACTIVE_APPOINTMENT_STATUSES },
+    scheduledAt: { $gte: new Date() }
+  })
+    .sort({ scheduledAt: 1, createdAt: 1 })
+    .lean();
+
+  await PatientProfile.findOneAndUpdate(
+    { user: patientId },
+    {
+      $set: {
+        nextAppointmentAt: nextAppointment?.scheduledAt || null,
+        lastInteractionAt: new Date()
+      }
+    },
+    { new: true, upsert: true }
+  );
+}
+
 async function findOrCreateDoctorProfile(doctorId) {
   const existingProfile = await DoctorProfile.findOne({ user: doctorId }).lean();
   if (existingProfile) return existingProfile;
@@ -390,7 +515,7 @@ function buildScheduleResponsePayload({ allowCustomSchedule, usingCustomSchedule
   };
 }
 
-async function buildDoctorAppointmentSlots({ doctor, dateValue }) {
+async function buildDoctorAppointmentSlots({ doctor, dateValue, excludeAppointmentId = "" }) {
   const { year, month, day, date, dateKey } = parseDateKey(dateValue, "date");
   const scheduleContext = await loadDoctorScheduleContext(doctor._id);
   const dayKey = getDayKeyFromDate(date);
@@ -400,7 +525,7 @@ async function buildDoctorAppointmentSlots({ doctor, dateValue }) {
   const dayEnd = new Date(year, month - 1, day + 1, 0, 0, 0, 0);
   const existingAppointments = await Appointment.find({
     doctor: doctor._id,
-    status: "scheduled",
+    status: { $in: ACTIVE_APPOINTMENT_STATUSES },
     scheduledAt: { $gte: dayStart, $lt: dayEnd }
   })
     .populate("patient", "name email phone status userNumber")
@@ -426,6 +551,7 @@ async function buildDoctorAppointmentSlots({ doctor, dateValue }) {
           )
         );
         const appointmentMatch = existingAppointments.find((appointment) => {
+          if (excludeAppointmentId && appointment?._id?.toString?.() === excludeAppointmentId) return false;
           const appointmentStart = new Date(appointment.scheduledAt);
           const appointmentEnd = appointment.endsAt ? new Date(appointment.endsAt) : new Date(appointmentStart.getTime() + (appointment.slotMinutes || slotMinutes) * 60 * 1000);
           return rangeOverlaps(startsAt.getTime(), endsAt.getTime(), appointmentStart.getTime(), appointmentEnd.getTime());
@@ -471,11 +597,12 @@ async function buildDoctorAppointmentSlots({ doctor, dateValue }) {
   };
 }
 
-async function ensureDoctorAvailability({ doctor, scheduledAt }) {
+async function ensureDoctorAvailability({ doctor, scheduledAt, excludeAppointmentId = "" }) {
   const appointmentTime = new Date(scheduledAt);
   const slotData = await buildDoctorAppointmentSlots({
     doctor,
-    dateValue: formatDateKeyFromDate(appointmentTime)
+    dateValue: formatDateKeyFromDate(appointmentTime),
+    excludeAppointmentId
   });
   const matchingSlot = slotData.slots.find((slot) => new Date(slot.startsAt).getTime() === appointmentTime.getTime());
 
@@ -490,6 +617,100 @@ async function ensureDoctorAvailability({ doctor, scheduledAt }) {
   return {
     slotMinutes: slotData.slotMinutes,
     endsAt: new Date(matchingSlot.endsAt)
+  };
+}
+
+function buildViewWindow(dateValue, viewMode) {
+  const baseDate = new Date(dateValue);
+  baseDate.setHours(0, 0, 0, 0);
+  const startDate = new Date(baseDate);
+  const endDate = new Date(baseDate);
+
+  if (viewMode === "weekly") {
+    const dayIndex = startDate.getDay();
+    const mondayOffset = dayIndex === 0 ? -6 : 1 - dayIndex;
+    startDate.setDate(startDate.getDate() + mondayOffset);
+    endDate.setTime(startDate.getTime());
+    endDate.setDate(endDate.getDate() + 7);
+  } else {
+    endDate.setDate(endDate.getDate() + 1);
+  }
+
+  return {
+    view: viewMode === "weekly" ? "weekly" : "daily",
+    startDate,
+    endDate,
+    startKey: formatDateKeyFromDate(startDate),
+    endKey: formatDateKeyFromDate(new Date(endDate.getTime() - 1))
+  };
+}
+
+function buildUpcomingAppointmentsSummary(appointments) {
+  const summary = {
+    total: appointments.length,
+    pendingConfirmation: 0,
+    confirmed: 0,
+    checkedIn: 0,
+    completed: 0,
+    cancelled: 0,
+    noShow: 0,
+    docsNeeded: 0,
+    needsAttention: 0,
+    overdueConfirmations: 0
+  };
+  const now = Date.now();
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayEnd = new Date(todayStart);
+  todayEnd.setDate(todayEnd.getDate() + 1);
+  summary.today = appointments.filter((appointment) => {
+    const scheduledTime = new Date(appointment.scheduledAt).getTime();
+    return scheduledTime >= todayStart.getTime() && scheduledTime < todayEnd.getTime();
+  }).length;
+
+  for (const appointment of appointments) {
+    const status = appointment.status || "pending";
+    if (status === "scheduled" || status === "pending") summary.pendingConfirmation += 1;
+    if (status === "confirmed") summary.confirmed += 1;
+    if (status === "checked_in") summary.checkedIn += 1;
+    if (status === "completed") summary.completed += 1;
+    if (status === "cancelled") summary.cancelled += 1;
+    if (status === "no_show") summary.noShow += 1;
+    if (appointment.documentsRequired || appointment.reportsRequired || appointment.preVisitUpdateRequired) summary.docsNeeded += 1;
+
+    const scheduledTime = new Date(appointment.scheduledAt).getTime();
+    const requiresConfirmation = status === "scheduled" || status === "pending";
+    const isSoon = scheduledTime > now && scheduledTime - now <= 24 * 60 * 60 * 1000;
+    if (requiresConfirmation && isSoon) summary.overdueConfirmations += 1;
+    if (requiresConfirmation || appointment.documentsRequired || appointment.reportsRequired || appointment.preVisitUpdateRequired) {
+      summary.needsAttention += 1;
+    }
+  }
+
+  return summary;
+}
+
+function buildAppointmentEmailContent({ actionType, appointment, managedDoctor }) {
+  const appointmentDateLabel = formatDateTimeLabel(appointment.scheduledAt);
+  const doctorName = managedDoctor?.name || appointment?.doctor?.name || "your doctor";
+  const patientName = appointment?.patient?.name || "Patient";
+  const appointmentTypeLabel = formatAppointmentTypeLabel(appointment.appointmentType);
+  const subjectByAction = {
+    reminder: `Appointment reminder for ${appointmentDateLabel}`,
+    confirmation: `Appointment confirmation for ${appointmentDateLabel}`,
+    instructions: `Preparation instructions for your appointment on ${appointmentDateLabel}`
+  };
+
+  const messageByAction = {
+    reminder: `Dear ${patientName},\n\nThis is a reminder for your ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} on ${appointmentDateLabel}.\nReason: ${appointment.reason || "General consultation"}.\n\nPlease arrive on time and contact the clinic if you need any changes.`,
+    confirmation: `Dear ${patientName},\n\nYour ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} is confirmed for ${appointmentDateLabel}.\nReason: ${appointment.reason || "General consultation"}.\n\nPlease keep this message for your reference.`,
+    instructions: `Dear ${patientName},\n\nHere are the preparation instructions for your ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} on ${appointmentDateLabel}.\n${appointment.preparationInstructions || "Please arrive 10 minutes early and carry any previous reports, prescription files, and ID proof."}\n\nRequired items:\n- Documents required: ${appointment.documentsRequired ? "Yes" : "No"}\n- Reports required: ${appointment.reportsRequired ? "Yes" : "No"}\n- Pre-visit update required: ${appointment.preVisitUpdateRequired ? "Yes" : "No"}`
+  };
+
+  return {
+    subject: subjectByAction[actionType] || `Appointment update for ${appointmentDateLabel}`,
+    message: messageByAction[actionType] || `Appointment update for ${appointmentDateLabel}`,
+    summary: `Doctor: Dr. ${doctorName}\nDate: ${appointmentDateLabel}\nType: ${appointmentTypeLabel}\nStatus: ${formatAppointmentStatusLabel(appointment.status)}`
   };
 }
 
@@ -508,6 +729,16 @@ export async function listDoctorAppointmentSlotsController(req, res) {
     if (!date) return res.status(400).json({ error: "date is required" });
     if (requesterRole === "doctor" && requestedDoctorId && requestedDoctorId !== requesterId) {
       return res.status(403).json({ error: "Doctor can only view their own slots" });
+    }
+
+    if (requesterRole === "nurse") {
+      const managedDoctor = await getManagedDoctorForNurse(requesterId);
+      if (managedDoctor?._id?.toString?.() !== doctorId) {
+        return res.status(403).json({ error: "You can only view slots for your managed doctor" });
+      }
+      if (requestedPatientId) {
+        await ensurePatientInNurseScope({ patientId: requestedPatientId, nurseId: requesterId, managedDoctorId: managedDoctor._id });
+      }
     }
 
     const [doctor, patient] = await Promise.all([
@@ -591,6 +822,108 @@ export async function updateDoctorScheduleController(req, res) {
   }
 }
 
+export async function listNurseUpcomingAppointmentsController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const nurseId = req?.user?._id?.toString?.() || "";
+    if (!nurseId) return res.status(401).json({ error: "Unauthorized" });
+
+    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    const search = normalizeString(req?.query?.search).toLowerCase();
+    const selectedPatientId = normalizeString(req?.query?.patientId);
+    const selectedStatus = normalizeString(req?.query?.status).toLowerCase();
+    const selectedType = normalizeString(req?.query?.appointmentType).toLowerCase();
+    const viewMode = normalizeString(req?.query?.view).toLowerCase() === "weekly" ? "weekly" : "daily";
+    const referenceDate = normalizeString(req?.query?.date) || formatDateKeyFromDate(new Date());
+
+    if (selectedStatus && !APPOINTMENT_STATUS_ENUM.includes(selectedStatus)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    if (selectedType && !APPOINTMENT_TYPE_ENUM.includes(selectedType)) {
+      return res.status(400).json({ error: "Invalid appointmentType" });
+    }
+
+    if (selectedPatientId) {
+      await ensurePatientInNurseScope({ patientId: selectedPatientId, nurseId, managedDoctorId: managedDoctor._id });
+    }
+
+    const patientProfiles = await PatientProfile.find({
+      assignedDoctors: managedDoctor._id,
+      assignedNurses: nurseId
+    })
+      .populate("user", "name email phone status userNumber")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const scopedPatients = patientProfiles
+      .map((profile) => buildUserOption(profile.user))
+      .filter(Boolean);
+    const scopedPatientIds = scopedPatients.map((patient) => patient.id);
+    const viewWindow = buildViewWindow(parseDateKey(referenceDate, "date").date, viewMode);
+    const appointments = await Appointment.find({
+      doctor: managedDoctor._id,
+      patient: { $in: scopedPatientIds },
+      scheduledAt: { $gte: viewWindow.startDate, $lt: viewWindow.endDate },
+      ...(selectedPatientId ? { patient: selectedPatientId } : {}),
+      ...(selectedStatus ? { status: selectedStatus } : {}),
+      ...(selectedType ? { appointmentType: selectedType } : {})
+    })
+      .sort({ scheduledAt: 1, createdAt: 1 })
+      .populate("patient", "name email phone status userNumber")
+      .populate("doctor", "name email phone status userNumber")
+      .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    const filteredAppointments = appointments.filter((appointment) => {
+      if (!search) return true;
+
+      const haystack = [
+        appointment?.patient?.name,
+        appointment?.patient?.email,
+        appointment?.patient?.phone,
+        appointment?.doctor?.name,
+        appointment?.reason,
+        appointment?.outcome,
+        appointment?.preparationInstructions
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(search);
+    });
+
+    const appointmentResponses = filteredAppointments.map((appointment) => buildAppointmentResponse(appointment)).filter(Boolean);
+
+    return res.json({
+      appointments: appointmentResponses,
+      summary: buildUpcomingAppointmentsSummary(appointmentResponses),
+      filters: {
+        date: referenceDate,
+        view: viewWindow.view,
+        rangeStart: viewWindow.startDate,
+        rangeEnd: new Date(viewWindow.endDate.getTime() - 1)
+      },
+      options: {
+        patients: scopedPatients,
+        doctors: [buildUserOption(managedDoctor)].filter(Boolean),
+        statuses: APPOINTMENT_STATUS_ENUM.map((value) => ({ value, label: formatAppointmentStatusLabel(value) })),
+        appointmentTypes: APPOINTMENT_TYPE_ENUM.map((value) => ({ value, label: formatAppointmentTypeLabel(value) }))
+      },
+      context: {
+        managedDoctor: buildUserOption(managedDoctor)
+      }
+    });
+  } catch (err) {
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    const message = err instanceof Error ? err.message : "Failed to load upcoming appointments";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
 export async function scheduleNurseAppointmentController(req, res) {
   try {
     if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
@@ -602,16 +935,30 @@ export async function scheduleNurseAppointmentController(req, res) {
     const doctorId = normalizeString(req?.body?.doctorId);
     const reason = normalizeString(req?.body?.reason);
     const scheduledAt = normalizeDate(req?.body?.scheduledAt, "scheduledAt");
+    const appointmentType = normalizeString(req?.body?.appointmentType).toLowerCase() || "in_person";
+    const preparationInstructions = normalizeString(req?.body?.preparationInstructions);
+    const documentsRequired = normalizeBoolean(req?.body?.documentsRequired);
+    const reportsRequired = normalizeBoolean(req?.body?.reportsRequired);
+    const preVisitUpdateRequired = normalizeBoolean(req?.body?.preVisitUpdateRequired);
 
     if (!patientId) return res.status(400).json({ error: "patientId is required" });
     if (!doctorId) return res.status(400).json({ error: "doctorId is required" });
     if (!scheduledAt) return res.status(400).json({ error: "scheduledAt is required" });
     if (!reason) return res.status(400).json({ error: "reason is required" });
+    if (!APPOINTMENT_TYPE_ENUM.includes(appointmentType)) {
+      return res.status(400).json({ error: "Invalid appointmentType" });
+    }
+
+    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    if (managedDoctor?._id?.toString?.() !== doctorId) {
+      return res.status(403).json({ error: "You can only create appointments for your managed doctor" });
+    }
 
     const [patient, doctor] = await Promise.all([
       findUserByRole(patientId, "patient", "patient"),
       findUserByRole(doctorId, "doctor", "doctor")
     ]);
+    await ensurePatientInNurseScope({ patientId: patient._id, nurseId, managedDoctorId: managedDoctor._id });
 
     const availability = await ensureDoctorAvailability({ doctor, scheduledAt });
 
@@ -623,24 +970,35 @@ export async function scheduleNurseAppointmentController(req, res) {
       endsAt: availability.endsAt,
       slotMinutes: availability.slotMinutes,
       reason,
-      status: "scheduled"
+      appointmentType,
+      status: "pending",
+      preparationInstructions,
+      documentsRequired,
+      reportsRequired,
+      preVisitUpdateRequired,
+      notes: [
+        {
+          type: "system",
+          channel: "desk",
+          message: `Appointment created for ${formatDateTimeLabel(scheduledAt)} as ${formatAppointmentTypeLabel(appointmentType)}.`,
+          createdBy: nurseId,
+          metadata: {
+            status: "pending",
+            appointmentType,
+            reason
+          },
+          createdAt: new Date()
+        }
+      ]
     });
 
-    await PatientProfile.findOneAndUpdate(
-      { user: patient._id },
-      {
-        $set: {
-          nextAppointmentAt: scheduledAt,
-          lastInteractionAt: new Date()
-        }
-      },
-      { new: true, upsert: true }
-    );
+    await syncPatientNextAppointment(patient._id);
 
     const populatedAppointment = await Appointment.findById(appointment._id)
       .populate("patient", "name email phone status userNumber")
       .populate("doctor", "name email phone status userNumber")
       .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
       .lean();
 
     return res.status(201).json({
@@ -672,10 +1030,16 @@ export async function scheduleNurseFollowUpController(req, res) {
     if (!followUpAt) return res.status(400).json({ error: "followUpAt is required" });
     if (!reason) return res.status(400).json({ error: "reason is required" });
 
+    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    if (managedDoctor?._id?.toString?.() !== doctorId) {
+      return res.status(403).json({ error: "You can only create follow-ups for your managed doctor" });
+    }
+
     const [patient, doctor] = await Promise.all([
       findUserByRole(patientId, "patient", "patient"),
       findUserByRole(doctorId, "doctor", "doctor")
     ]);
+    await ensurePatientInNurseScope({ patientId: patient._id, nurseId, managedDoctorId: managedDoctor._id });
 
     const title = `Follow up with ${patient.name}`;
 
@@ -729,8 +1093,33 @@ export async function updateNurseAppointmentController(req, res) {
     const nurseId = req?.user?._id?.toString?.() || "";
     const appointmentId = normalizeString(req?.params?.appointmentId);
     const outcome = normalizeString(req?.body?.outcome);
+    const reason = normalizeString(req?.body?.reason);
+    const status = normalizeString(req?.body?.status).toLowerCase();
+    const scheduledAt = Object.prototype.hasOwnProperty.call(req?.body || {}, "scheduledAt")
+      ? normalizeDate(req?.body?.scheduledAt, "scheduledAt")
+      : null;
+    const appointmentType = Object.prototype.hasOwnProperty.call(req?.body || {}, "appointmentType")
+      ? normalizeString(req?.body?.appointmentType).toLowerCase()
+      : "";
+    const preparationInstructions = Object.prototype.hasOwnProperty.call(req?.body || {}, "preparationInstructions")
+      ? normalizeString(req?.body?.preparationInstructions)
+      : "";
+    const noteMessage = normalizeString(req?.body?.note);
+    const actionType = normalizeString(req?.body?.actionType).toLowerCase();
     const hasStatus = Object.prototype.hasOwnProperty.call(req?.body || {}, "status");
     const hasOutcome = Object.prototype.hasOwnProperty.call(req?.body || {}, "outcome");
+    const hasReason = Object.prototype.hasOwnProperty.call(req?.body || {}, "reason");
+    const hasScheduledAt = Object.prototype.hasOwnProperty.call(req?.body || {}, "scheduledAt");
+    const hasAppointmentType = Object.prototype.hasOwnProperty.call(req?.body || {}, "appointmentType");
+    const hasPreparationInstructions = Object.prototype.hasOwnProperty.call(req?.body || {}, "preparationInstructions");
+    const hasDocumentsRequired = Object.prototype.hasOwnProperty.call(req?.body || {}, "documentsRequired");
+    const hasReportsRequired = Object.prototype.hasOwnProperty.call(req?.body || {}, "reportsRequired");
+    const hasPreVisitUpdateRequired = Object.prototype.hasOwnProperty.call(req?.body || {}, "preVisitUpdateRequired");
+    const hasNote = Object.prototype.hasOwnProperty.call(req?.body || {}, "note");
+    const hasActionType = Object.prototype.hasOwnProperty.call(req?.body || {}, "actionType");
+    const nextDocumentsRequired = hasDocumentsRequired ? normalizeBoolean(req?.body?.documentsRequired) : false;
+    const nextReportsRequired = hasReportsRequired ? normalizeBoolean(req?.body?.reportsRequired) : false;
+    const nextPreVisitUpdateRequired = hasPreVisitUpdateRequired ? normalizeBoolean(req?.body?.preVisitUpdateRequired) : false;
 
     if (!nurseId) return res.status(401).json({ error: "Unauthorized" });
     if (!/^[a-f\d]{24}$/i.test(appointmentId)) {
@@ -769,32 +1158,164 @@ export async function updateNurseAppointmentController(req, res) {
       return res.status(403).json({ error: "This patient is outside your assignment scope" });
     }
 
-    if (!hasStatus && !hasOutcome) {
+    if (
+      !hasStatus &&
+      !hasOutcome &&
+      !hasReason &&
+      !hasScheduledAt &&
+      !hasAppointmentType &&
+      !hasPreparationInstructions &&
+      !hasDocumentsRequired &&
+      !hasReportsRequired &&
+      !hasPreVisitUpdateRequired &&
+      !hasNote &&
+      !hasActionType
+    ) {
       return res.status(400).json({ error: "At least one field is required" });
     }
 
     if (hasStatus) {
-      const nextStatus = normalizeString(req?.body?.status).toLowerCase();
-      if (!["scheduled", "completed", "cancelled"].includes(nextStatus)) {
+      if (!APPOINTMENT_STATUS_ENUM.includes(status)) {
         return res.status(400).json({ error: "Invalid status" });
       }
-      appointment.status = nextStatus;
+      appointment.status = status;
+      if (status === "checked_in") appointment.checkedInAt = new Date();
+      if (status === "completed") appointment.completedAt = new Date();
+      if (status === "cancelled") appointment.cancelledAt = new Date();
+      if (status === "no_show") appointment.noShowAt = new Date();
+      if (["scheduled", "pending", "confirmed"].includes(status)) {
+        appointment.checkedInAt = null;
+        appointment.completedAt = null;
+        appointment.cancelledAt = null;
+        appointment.noShowAt = null;
+      }
+      addAppointmentNote(appointment, {
+        type: "status",
+        channel: "system",
+        message: `Appointment status changed to ${formatAppointmentStatusLabel(status)}.`,
+        createdBy: nurseId,
+        metadata: { status }
+      });
     }
 
     if (hasOutcome) {
       appointment.outcome = outcome;
+      if (outcome) {
+        addAppointmentNote(appointment, {
+          type: "note",
+          channel: "desk",
+          message: `Outcome updated: ${outcome}`,
+          createdBy: nurseId,
+          metadata: { outcome }
+        });
+      }
+    }
+
+    if (hasReason) {
+      if (!reason) return res.status(400).json({ error: "reason is required" });
+      appointment.reason = reason;
+    }
+
+    if (hasAppointmentType) {
+      if (!APPOINTMENT_TYPE_ENUM.includes(appointmentType)) {
+        return res.status(400).json({ error: "Invalid appointmentType" });
+      }
+      appointment.appointmentType = appointmentType;
+    }
+
+    if (hasPreparationInstructions) {
+      appointment.preparationInstructions = preparationInstructions;
+    }
+
+    if (hasDocumentsRequired) appointment.documentsRequired = nextDocumentsRequired;
+    if (hasReportsRequired) appointment.reportsRequired = nextReportsRequired;
+    if (hasPreVisitUpdateRequired) appointment.preVisitUpdateRequired = nextPreVisitUpdateRequired;
+
+    if (hasScheduledAt) {
+      if (!scheduledAt) return res.status(400).json({ error: "scheduledAt is required" });
+      const availability = await ensureDoctorAvailability({
+        doctor: appointment.doctor,
+        scheduledAt,
+        excludeAppointmentId: appointment._id.toString()
+      });
+      appointment.scheduledAt = scheduledAt;
+      appointment.endsAt = availability.endsAt;
+      appointment.slotMinutes = availability.slotMinutes;
+      addAppointmentNote(appointment, {
+        type: "reschedule",
+        channel: "desk",
+        message: `Appointment rescheduled to ${formatDateTimeLabel(scheduledAt)}.`,
+        createdBy: nurseId,
+        metadata: { scheduledAt }
+      });
+    }
+
+    if (hasNote && noteMessage) {
+      addAppointmentNote(appointment, {
+        type: "note",
+        channel: "desk",
+        message: noteMessage,
+        createdBy: nurseId
+      });
+    }
+
+    const warnings = [];
+    if (hasActionType) {
+      if (!EMAIL_ACTIONS.includes(actionType)) {
+        return res.status(400).json({ error: "Invalid actionType" });
+      }
+
+      if (!appointment.patient?.email) {
+        warnings.push("Patient email is not available for this action.");
+      } else {
+        try {
+          const emailContent = buildAppointmentEmailContent({ actionType, appointment, managedDoctor: appointment.doctor });
+          await sendAdminCustomEmail({
+            toEmail: appointment.patient.email,
+            name: appointment.patient.name,
+            role: "patient",
+            subject: emailContent.subject,
+            message: emailContent.message,
+            summary: emailContent.summary,
+            userNumber: appointment.patient.userNumber
+          });
+
+          if (actionType === "confirmation") {
+            appointment.confirmationSentAt = new Date();
+            if (appointment.status === "pending" || appointment.status === "scheduled") {
+              appointment.status = "confirmed";
+            }
+          } else {
+            appointment.lastReminderAt = new Date();
+          }
+
+          appointment.lastReminderType = actionType;
+          addAppointmentNote(appointment, {
+            type: actionType === "instructions" ? "instruction" : actionType,
+            channel: "email",
+            message: `${formatAppointmentTypeLabel(actionType)} email sent to patient.`,
+            createdBy: nurseId,
+            metadata: { actionType }
+          });
+        } catch (emailError) {
+          warnings.push(emailError instanceof Error ? emailError.message : "Failed to send email");
+        }
+      }
     }
 
     await appointment.save();
+    await syncPatientNextAppointment(appointment.patient?._id);
 
     const updatedAppointment = await Appointment.findById(appointment._id)
       .populate("patient", "name email phone status userNumber")
       .populate("doctor", "name email phone status userNumber")
       .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
       .lean();
 
     return res.json({
-      message: "Appointment updated successfully.",
+      message: warnings.length === 0 ? "Appointment updated successfully." : "Appointment updated with warnings.",
+      warnings,
       appointment: buildAppointmentResponse(updatedAppointment)
     });
   } catch (err) {

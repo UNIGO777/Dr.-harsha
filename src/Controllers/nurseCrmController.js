@@ -5,6 +5,7 @@ import {
   CRM_TASK_PRIORITY_ENUM,
   CRM_TASK_STATUS_ENUM
 } from "../Models/CrmTask.js";
+import { Appointment } from "../Models/Appointment.js";
 import { NurseProfile } from "../Models/NurseProfile.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
 import { buildPromptSections, generateGptJson } from "../utils/gptService.js";
@@ -68,6 +69,32 @@ function buildPatientOptionResponse(profile) {
   };
 }
 
+function buildTaskLinkResponse(task) {
+  if (!task?._id) return null;
+
+  return {
+    id: task._id.toString(),
+    title: task.title,
+    status: task.status,
+    priority: task.priority,
+    followUpAt: task.followUpAt || null,
+    dueAt: task.dueAt || null
+  };
+}
+
+function buildAppointmentLinkResponse(appointment) {
+  if (!appointment?._id) return null;
+
+  return {
+    id: appointment._id.toString(),
+    scheduledAt: appointment.scheduledAt || null,
+    endsAt: appointment.endsAt || null,
+    status: appointment.status || "scheduled",
+    outcome: appointment.outcome || "",
+    reason: appointment.reason || ""
+  };
+}
+
 function buildCrmTaskResponse(task) {
   if (!task?._id) return null;
 
@@ -84,9 +111,15 @@ function buildCrmTaskResponse(task) {
     callOutcome: task.callOutcome || "pending",
     lastCalledAt: task.lastCalledAt || null,
     completedAt: task.completedAt || null,
+    responseSummary: task.responseSummary || "",
+    patientResponse: task.patientResponse || "",
+    nextStep: task.nextStep || "",
+    respondedAt: task.respondedAt || null,
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
     assignedDoctor: buildCareMemberResponse(task.assignedDoctor),
+    linkedNextTask: buildTaskLinkResponse(task.linkedNextTask),
+    linkedAppointment: buildAppointmentLinkResponse(task.linkedAppointment),
     patient: task?.patient?._id
       ? {
           id: task.patient._id.toString(),
@@ -353,6 +386,8 @@ export async function listNurseCrmTasksController(req, res) {
     const rawTasks = await CrmTask.find(taskQuery)
       .populate("patient", "name email phone status userNumber")
       .populate("assignedDoctor", "name email phone status userNumber")
+      .populate("linkedNextTask", "title status priority followUpAt dueAt")
+      .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
       .populate("notes.createdBy", "name email phone status userNumber")
       .sort({ escalationRequired: -1, priority: -1, dueAt: 1, updatedAt: -1 })
       .lean();
@@ -405,6 +440,13 @@ export async function createNurseCrmTaskController(req, res) {
     const followUpAt = normalizeDate(req?.body?.followUpAt, "followUpAt");
     const escalationRequired = Boolean(req?.body?.escalationRequired);
     const initialNote = normalizeString(req?.body?.note);
+    const responseSummary = normalizeString(req?.body?.responseSummary);
+    const patientResponse = normalizeString(req?.body?.patientResponse);
+    const nextStep = normalizeString(req?.body?.nextStep);
+    const respondedAt =
+      responseSummary || patientResponse || nextStep || callOutcome !== "pending" || status === "completed" ? new Date() : null;
+    const linkedNextTaskId = normalizeString(req?.body?.linkedNextTaskId);
+    const linkedAppointmentId = normalizeString(req?.body?.linkedAppointmentId);
 
     if (!patientId) {
       return res.status(400).json({ error: "patientId is required" });
@@ -421,6 +463,20 @@ export async function createNurseCrmTaskController(req, res) {
       managedDoctorId: managedDoctor?._id?.toString?.() || ""
     });
 
+    if (linkedNextTaskId) {
+      const linkedTask = await CrmTask.findOne({ _id: linkedNextTaskId, assignedNurse: nurseId }).lean();
+      if (!linkedTask?._id) {
+        return res.status(400).json({ error: "Invalid linkedNextTaskId" });
+      }
+    }
+
+    if (linkedAppointmentId) {
+      const linkedAppointment = await Appointment.findOne({ _id: linkedAppointmentId, patient: patientProfile.user._id }).lean();
+      if (!linkedAppointment?._id) {
+        return res.status(400).json({ error: "Invalid linkedAppointmentId" });
+      }
+    }
+
     const task = await CrmTask.create({
       patient: patientProfile.user._id,
       assignedNurse: nurseId,
@@ -436,12 +492,20 @@ export async function createNurseCrmTaskController(req, res) {
       callOutcome,
       lastCalledAt: callOutcome !== "pending" ? new Date() : null,
       completedAt: status === "completed" ? new Date() : null,
+      responseSummary,
+      patientResponse,
+      nextStep,
+      respondedAt,
+      linkedNextTask: linkedNextTaskId || null,
+      linkedAppointment: linkedAppointmentId || null,
       notes: initialNote ? [{ content: initialNote, createdBy: nurseId, createdAt: new Date() }] : []
     });
 
     const populatedTask = await CrmTask.findById(task._id)
       .populate("patient", "name email phone status userNumber")
       .populate("assignedDoctor", "name email phone status userNumber")
+      .populate("linkedNextTask", "title status priority followUpAt dueAt")
+      .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
       .populate("notes.createdBy", "name email phone status userNumber")
       .lean();
 
@@ -558,6 +622,26 @@ export async function updateNurseCrmTaskController(req, res) {
       }
     }
 
+    if (Object.prototype.hasOwnProperty.call(req?.body || {}, "responseSummary")) {
+      task.responseSummary = normalizeString(req?.body?.responseSummary);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req?.body || {}, "patientResponse")) {
+      task.patientResponse = normalizeString(req?.body?.patientResponse);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req?.body || {}, "nextStep")) {
+      task.nextStep = normalizeString(req?.body?.nextStep);
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(req?.body || {}, "responseSummary") ||
+      Object.prototype.hasOwnProperty.call(req?.body || {}, "patientResponse") ||
+      Object.prototype.hasOwnProperty.call(req?.body || {}, "nextStep")
+    ) {
+      task.respondedAt = task.responseSummary || task.patientResponse || task.nextStep ? new Date() : null;
+    }
+
     if (Object.prototype.hasOwnProperty.call(req?.body || {}, "dueAt")) {
       task.dueAt = normalizeDate(req?.body?.dueAt, "dueAt");
     }
@@ -568,6 +652,40 @@ export async function updateNurseCrmTaskController(req, res) {
 
     if (Object.prototype.hasOwnProperty.call(req?.body || {}, "escalationRequired")) {
       task.escalationRequired = Boolean(req?.body?.escalationRequired);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req?.body || {}, "linkedNextTaskId")) {
+      const linkedNextTaskId = normalizeString(req?.body?.linkedNextTaskId);
+      if (!linkedNextTaskId) {
+        task.linkedNextTask = null;
+      } else {
+        const linkedTask = await CrmTask.findOne({ _id: linkedNextTaskId, assignedNurse: nurseId }).lean();
+        if (!linkedTask?._id) {
+          return res.status(400).json({ error: "Invalid linkedNextTaskId" });
+        }
+        task.linkedNextTask = linkedTask._id;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req?.body || {}, "linkedAppointmentId")) {
+      const linkedAppointmentId = normalizeString(req?.body?.linkedAppointmentId);
+      if (!linkedAppointmentId) {
+        task.linkedAppointment = null;
+      } else {
+        const linkedAppointment = await Appointment.findOne({ _id: linkedAppointmentId, patient: task.patient }).lean();
+        if (!linkedAppointment?._id) {
+          return res.status(400).json({ error: "Invalid linkedAppointmentId" });
+        }
+        task.linkedAppointment = linkedAppointment._id;
+      }
+    }
+
+    if (
+      task.status === "completed" &&
+      (task.callOutcome !== "pending" || task.responseSummary || task.patientResponse || task.nextStep) &&
+      !task.respondedAt
+    ) {
+      task.respondedAt = new Date();
     }
 
     const note = normalizeString(req?.body?.note);
@@ -584,6 +702,8 @@ export async function updateNurseCrmTaskController(req, res) {
     const populatedTask = await CrmTask.findById(task._id)
       .populate("patient", "name email phone status userNumber")
       .populate("assignedDoctor", "name email phone status userNumber")
+      .populate("linkedNextTask", "title status priority followUpAt dueAt")
+      .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
       .populate("notes.createdBy", "name email phone status userNumber")
       .lean();
 

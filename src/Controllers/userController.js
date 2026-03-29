@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { User, USER_ROLES_ENUM, USER_STATUSES_ENUM } from "../Models/User.js";
 import { Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
@@ -161,10 +162,34 @@ function buildPatientProfileNoteResponse(note) {
   if (!note?.content) return null;
 
   return {
+    id: note?._id ? note._id.toString() : "",
     content: note.content,
     createdAt: note.createdAt || null,
+    updatedAt: note.updatedAt || null,
     createdBy: buildCareTeamMemberResponse(note.createdBy)
   };
+}
+
+function ensurePatientProfileNotesHaveIds(patientProfile) {
+  if (!Array.isArray(patientProfile?.notes)) return false;
+
+  let hasChanges = false;
+
+  patientProfile.notes.forEach((note) => {
+    if (!note) return;
+
+    if (!note._id) {
+      note._id = new mongoose.Types.ObjectId();
+      hasChanges = true;
+    }
+
+    if (typeof note.updatedAt === "undefined") {
+      note.updatedAt = null;
+      hasChanges = true;
+    }
+  });
+
+  return hasChanges;
 }
 
 function buildPatientFollowUpHistoryResponse(task) {
@@ -182,8 +207,32 @@ function buildPatientFollowUpHistoryResponse(task) {
     callOutcome: task.callOutcome || "pending",
     lastCalledAt: task.lastCalledAt || null,
     completedAt: task.completedAt || null,
+    responseSummary: task.responseSummary || "",
+    patientResponse: task.patientResponse || "",
+    nextStep: task.nextStep || "",
+    respondedAt: task.respondedAt || null,
     assignedDoctor: buildCareTeamMemberResponse(task.assignedDoctor),
     assignedNurse: buildCareTeamMemberResponse(task.assignedNurse),
+    linkedNextTask: task?.linkedNextTask?._id
+      ? {
+          id: task.linkedNextTask._id.toString(),
+          title: task.linkedNextTask.title,
+          status: task.linkedNextTask.status,
+          priority: task.linkedNextTask.priority,
+          followUpAt: task.linkedNextTask.followUpAt || null,
+          dueAt: task.linkedNextTask.dueAt || null
+        }
+      : null,
+    linkedAppointment: task?.linkedAppointment?._id
+      ? {
+          id: task.linkedAppointment._id.toString(),
+          scheduledAt: task.linkedAppointment.scheduledAt || null,
+          endsAt: task.linkedAppointment.endsAt || null,
+          status: task.linkedAppointment.status || "scheduled",
+          outcome: task.linkedAppointment.outcome || "",
+          reason: task.linkedAppointment.reason || ""
+        }
+      : null,
     notes: Array.isArray(task.notes)
       ? task.notes.map((note) => buildPatientProfileNoteResponse(note)).filter(Boolean)
       : [],
@@ -751,7 +800,17 @@ export async function getNursePatientProfileController(req, res) {
       patientId
     });
 
-    const patientProfile = await PatientProfile.findOne(patientProfileQuery)
+    const patientProfileDocument = await PatientProfile.findOne(patientProfileQuery);
+
+    if (!patientProfileDocument?._id) {
+      return res.status(404).json({ error: "Patient not found in your assignment" });
+    }
+
+    if (ensurePatientProfileNotesHaveIds(patientProfileDocument)) {
+      await patientProfileDocument.save();
+    }
+
+    const patientProfile = await PatientProfile.findById(patientProfileDocument._id)
       .populate("user", "name email role phone status userNumber createdAt updatedAt lastLoginAt")
       .populate("assignedDoctors", "name email phone status userNumber")
       .populate("assignedNurses", "name email phone status userNumber")
@@ -763,7 +822,24 @@ export async function getNursePatientProfileController(req, res) {
     }
 
     const now = new Date();
-    const [followUpHistory, appointmentHistory] = await Promise.all([
+    const [futureFollowUps, followUpHistory, appointmentHistory] = await Promise.all([
+      CrmTask.find({
+        patient: patientProfile.user._id,
+        assignedDoctor: managedDoctor._id,
+        status: { $in: ["pending", "in_progress"] },
+        $or: [
+          { followUpAt: { $gte: now } },
+          { dueAt: { $gte: now } }
+        ]
+      })
+        .populate("assignedDoctor", "name email phone status userNumber")
+        .populate("assignedNurse", "name email phone status userNumber")
+        .populate("linkedNextTask", "title status priority followUpAt dueAt")
+        .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
+        .populate("notes.createdBy", "name email phone status userNumber")
+        .sort({ followUpAt: 1, dueAt: 1, updatedAt: -1 })
+        .limit(8)
+        .lean(),
       CrmTask.find({
         patient: patientProfile.user._id,
         assignedDoctor: managedDoctor._id,
@@ -774,6 +850,8 @@ export async function getNursePatientProfileController(req, res) {
       })
         .populate("assignedDoctor", "name email phone status userNumber")
         .populate("assignedNurse", "name email phone status userNumber")
+        .populate("linkedNextTask", "title status priority followUpAt dueAt")
+        .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
         .populate("notes.createdBy", "name email phone status userNumber")
         .sort({ followUpAt: -1, completedAt: -1, updatedAt: -1 })
         .limit(8)
@@ -796,6 +874,7 @@ export async function getNursePatientProfileController(req, res) {
         notes: Array.isArray(patientProfile.notes)
           ? patientProfile.notes.map((note) => buildPatientProfileNoteResponse(note)).filter(Boolean)
           : [],
+        futureFollowUps: futureFollowUps.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
         followUpHistory: followUpHistory.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
         appointmentHistory: appointmentHistory.map((appointment) => buildPatientAppointmentHistoryResponse(appointment)).filter(Boolean)
       }
@@ -836,10 +915,15 @@ export async function addNursePatientProfileNoteController(req, res) {
       return res.status(404).json({ error: "Patient not found in your assignment" });
     }
 
+    if (ensurePatientProfileNotesHaveIds(patientProfile)) {
+      await patientProfile.save();
+    }
+
     patientProfile.notes.push({
       content,
       createdBy: nurseId,
-      createdAt: new Date()
+      createdAt: new Date(),
+      updatedAt: null
     });
     patientProfile.lastInteractionAt = new Date();
     await patientProfile.save();
@@ -856,6 +940,92 @@ export async function addNursePatientProfileNoteController(req, res) {
   } catch (err) {
     const statusCode = err?.statusCode || 500;
     const message = err instanceof Error ? err.message : "Failed to add patient note";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function updateNursePatientProfileNoteController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const nurseId = req?.user?._id;
+    const patientId = req?.params?.patientId;
+    const noteId = typeof req?.params?.noteId === "string" ? req.params.noteId.trim() : "";
+    const content = normalizeString(req?.body?.content);
+    const legacyCreatedAt = typeof req?.body?.legacyCreatedAt === "string" ? req.body.legacyCreatedAt.trim() : "";
+
+    if (!nurseId) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    if (!noteId) {
+      return res.status(400).json({ error: "noteId is required" });
+    }
+
+    if (!content) {
+      return res.status(400).json({ error: "content is required" });
+    }
+
+    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    const patientProfileQuery = buildScopedPatientProfileQuery({
+      nurseId,
+      managedDoctorId: managedDoctor._id,
+      patientId
+    });
+
+    const patientProfile = await PatientProfile.findOne(patientProfileQuery);
+
+    if (!patientProfile?._id) {
+      return res.status(404).json({ error: "Patient not found in your assignment" });
+    }
+
+    if (ensurePatientProfileNotesHaveIds(patientProfile)) {
+      await patientProfile.save();
+    }
+
+    const targetNote = Array.isArray(patientProfile.notes)
+      ? patientProfile.notes.find((note) => note?._id?.toString() === noteId)
+      : null;
+
+    const legacyTargetNote =
+      targetNote || !legacyCreatedAt
+        ? targetNote
+        : Array.isArray(patientProfile.notes)
+          ? patientProfile.notes.find((note) => {
+              const noteCreatedAt = note?.createdAt ? new Date(note.createdAt).toISOString() : "";
+              return noteCreatedAt && noteCreatedAt === legacyCreatedAt;
+            })
+          : null;
+
+    if (!legacyTargetNote) {
+      return res.status(404).json({ error: "Patient note not found" });
+    }
+
+    legacyTargetNote.content = content;
+    legacyTargetNote.updatedAt = new Date();
+    patientProfile.lastInteractionAt = new Date();
+    await patientProfile.save();
+
+    const updatedProfile = await PatientProfile.findById(patientProfile._id)
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    const updatedNote = Array.isArray(updatedProfile?.notes)
+      ? updatedProfile.notes.find((note) => {
+          if (note?._id?.toString() === legacyTargetNote?._id?.toString()) return true;
+          if (!legacyCreatedAt) return false;
+          const noteCreatedAt = note?.createdAt ? new Date(note.createdAt).toISOString() : "";
+          return noteCreatedAt && noteCreatedAt === legacyCreatedAt;
+        })
+      : null;
+
+    return res.json({
+      message: "Patient note updated successfully.",
+      note: buildPatientProfileNoteResponse(updatedNote)
+    });
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const message = err instanceof Error ? err.message : "Failed to update patient note";
     return res.status(statusCode).json({ error: message });
   }
 }

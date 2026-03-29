@@ -4,9 +4,10 @@ const patientProfileNoteSchema = new mongoose.Schema(
   {
     content: { type: String, trim: true, required: true },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: null }
   },
-  { _id: false }
+  { _id: true }
 );
 
 const patientProfileSchema = new mongoose.Schema(

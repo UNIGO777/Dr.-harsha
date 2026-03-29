@@ -6,6 +6,7 @@ import {
   getNursePatientProfileController,
   listNursePatientManagementController,
   listUsersController,
+  updateNursePatientProfileNoteController,
   updateUserController
 } from "../Controllers/userController.js";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../Controllers/nurseCrmController.js";
 import {
   getDoctorScheduleController,
+  listNurseUpcomingAppointmentsController,
   listDoctorAppointmentSlotsController,
   scheduleNurseAppointmentController,
   scheduleNurseFollowUpController,
@@ -42,6 +44,7 @@ userRouter.get("/appointment-slots", authMiddleware, roleMiddleware(["super_admi
 userRouter.get("/doctor/schedule", authMiddleware, roleMiddleware(["doctor"]), getDoctorScheduleController);
 userRouter.get("/nurse/patients", authMiddleware, roleMiddleware(["nurse"]), listNursePatientManagementController);
 userRouter.get("/nurse/patients/:patientId/profile", authMiddleware, roleMiddleware(["nurse"]), getNursePatientProfileController);
+userRouter.get("/nurse/appointments", authMiddleware, roleMiddleware(["nurse"]), listNurseUpcomingAppointmentsController);
 userRouter.get("/nurse/crm", authMiddleware, roleMiddleware(["nurse"]), listNurseCrmTasksController);
 userRouter.get("/broadcast-recipients", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listBroadcastRecipientsController);
 userRouter.get("/broadcast-history", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listBroadcastHistoryController);
@@ -62,6 +65,7 @@ userRouter.post(
 );
 userRouter.patch("/doctor/schedule", authMiddleware, roleMiddleware(["doctor"]), updateDoctorScheduleController);
 userRouter.patch("/nurse/appointments/:appointmentId", authMiddleware, roleMiddleware(["nurse"]), updateNurseAppointmentController);
+userRouter.patch("/nurse/patients/:patientId/notes/:noteId", authMiddleware, roleMiddleware(["nurse"]), updateNursePatientProfileNoteController);
 userRouter.patch("/:userId", authMiddleware, roleMiddleware(["super_admin"]), updateUserController);
 userRouter.patch("/nurse/crm/:taskId", authMiddleware, roleMiddleware(["nurse"]), updateNurseCrmTaskController);
 userRouter.post("/:userId/generate-email", authMiddleware, roleMiddleware(["super_admin"]), generateUserEmailDraftController);
