@@ -16,6 +16,7 @@ import {
   updateNurseCrmTaskController
 } from "../Controllers/nurseCrmController.js";
 import {
+  generateNurseAppointmentInstructionDraftController,
   getDoctorScheduleController,
   listNurseUpcomingAppointmentsController,
   listDoctorAppointmentSlotsController,
@@ -52,6 +53,7 @@ userRouter.post("/", authMiddleware, createUserController);
 userRouter.post("/nurse/crm", authMiddleware, roleMiddleware(["nurse"]), createNurseCrmTaskController);
 userRouter.post("/nurse/crm/draft", authMiddleware, roleMiddleware(["nurse"]), generateNurseCrmTaskDraftController);
 userRouter.post("/nurse/appointments", authMiddleware, roleMiddleware(["nurse"]), scheduleNurseAppointmentController);
+userRouter.post("/nurse/appointments/:appointmentId/instruction-draft", authMiddleware, roleMiddleware(["nurse"]), generateNurseAppointmentInstructionDraftController);
 userRouter.post("/nurse/follow-ups", authMiddleware, roleMiddleware(["nurse"]), scheduleNurseFollowUpController);
 userRouter.post("/nurse/patients/:patientId/notes", authMiddleware, roleMiddleware(["nurse"]), addNursePatientProfileNoteController);
 userRouter.post("/broadcast-email/draft", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), generateBroadcastEmailDraftController);

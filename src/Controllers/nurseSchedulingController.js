@@ -5,6 +5,7 @@ import { NurseProfile } from "../Models/NurseProfile.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
 import { User } from "../Models/User.js";
 import { sendAdminCustomEmail } from "../utils/emailService.js";
+import { buildPromptSections, generateGptJson } from "../utils/gptService.js";
 
 const DAY_KEYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const DAY_LABELS = {
@@ -447,6 +448,65 @@ async function ensurePatientInNurseScope({ patientId, nurseId, managedDoctorId }
   }
 
   return patientProfile;
+}
+
+async function generateAiAppointmentInstructionDraft({
+  appointment,
+  patientProfile,
+  nurseUser,
+  managedDoctor,
+  prompt,
+  tone,
+  extraInstructions
+}) {
+  const promptText = normalizeString(prompt) || "Create patient preparation instructions for this appointment.";
+  const safeTone = normalizeString(tone) || "professional";
+  const patientUser = appointment?.patient || null;
+  const reason = normalizeString(appointment?.reason);
+  const requirementSummary = [
+    appointment?.documentsRequired ? "documents required" : "",
+    appointment?.reportsRequired ? "reports required" : "",
+    appointment?.preVisitUpdateRequired ? "pre-visit update required" : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const systemPrompt = [
+    "You create patient preparation instructions for hospital appointments.",
+    "Return valid JSON only with keys preparationInstructions and note.",
+    "preparationInstructions must be patient-facing, practical, and easy to follow.",
+    "note must be a short internal coordination note for the nurse and may be an empty string.",
+    "Never include markdown, bullet symbols, numbering, code fences, or explanatory text outside JSON."
+  ].join(" ");
+  const userPrompt = buildPromptSections([
+    { label: "Nurse name", value: nurseUser?.name || "Assigned nurse" },
+    { label: "Managed doctor", value: managedDoctor?.name || appointment?.doctor?.name || "Assigned doctor" },
+    { label: "Patient name", value: patientUser?.name || "Unknown patient" },
+    { label: "Patient email", value: patientUser?.email || "Not available" },
+    { label: "Patient phone", value: patientUser?.phone || "Not available" },
+    { label: "Patient user number", value: patientUser?.userNumber ? String(patientUser.userNumber) : "Not assigned" },
+    { label: "Patient CRM priority", value: patientProfile?.priority || "medium" },
+    { label: "Appointment date", value: appointment?.scheduledAt ? new Date(appointment.scheduledAt).toISOString() : "Not scheduled" },
+    { label: "Appointment type", value: appointment?.appointmentType || "in_person" },
+    { label: "Appointment reason", value: reason || "General consultation" },
+    { label: "Current preparation instructions", value: normalizeString(appointment?.preparationInstructions) || "None added" },
+    { label: "Existing coordination note", value: Array.isArray(appointment?.notes) && appointment.notes.length > 0 ? appointment.notes[0]?.message || "None" : "None" },
+    { label: "Requirement summary", value: requirementSummary || "No special requirements marked" },
+    { label: "Requested tone", value: safeTone },
+    normalizeString(extraInstructions) ? { label: "Extra instructions", value: normalizeString(extraInstructions) } : null,
+    { label: "Request", value: promptText }
+  ]);
+  const response = await generateGptJson({
+    systemPrompt,
+    userPrompt,
+    model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature: 0.4
+  });
+  const data = response?.data || {};
+
+  return {
+    preparationInstructions: normalizeString(data.preparationInstructions),
+    note: normalizeString(data.note)
+  };
 }
 
 async function syncPatientNextAppointment(patientId) {
@@ -994,6 +1054,69 @@ export async function listNurseUpcomingAppointmentsController(req, res) {
   } catch (err) {
     const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
     const message = err instanceof Error ? err.message : "Failed to load upcoming appointments";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function generateNurseAppointmentInstructionDraftController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const nurseId = req?.user?._id?.toString?.() || "";
+    if (!nurseId) return res.status(401).json({ error: "Unauthorized" });
+
+    const appointmentId = normalizeString(req?.params?.appointmentId);
+    const prompt = normalizeString(req?.body?.prompt);
+    const tone = normalizeString(req?.body?.tone);
+    const extraInstructions = normalizeString(req?.body?.extraInstructions);
+
+    if (!/^[a-f\d]{24}$/i.test(appointmentId)) {
+      return res.status(400).json({ error: "Invalid appointmentId" });
+    }
+
+    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    const appointment = await Appointment.findOne({ _id: appointmentId })
+      .populate("patient", "name email phone status userNumber")
+      .populate("doctor", "name email phone status userNumber")
+      .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    if (!appointment?._id) {
+      return res.status(404).json({ error: "Appointment not found" });
+    }
+
+    if (appointment.doctor?._id?.toString?.() !== managedDoctor._id?.toString?.()) {
+      return res.status(403).json({ error: "This appointment is outside your assignment scope" });
+    }
+
+    const patientProfile = await ensurePatientInNurseScope({
+      patientId: appointment.patient?._id?.toString?.() || "",
+      nurseId,
+      managedDoctorId: managedDoctor._id
+    });
+
+    const draft = await generateAiAppointmentInstructionDraft({
+      appointment,
+      patientProfile,
+      nurseUser: req.user,
+      managedDoctor,
+      prompt,
+      tone,
+      extraInstructions
+    });
+
+    return res.json({
+      message: "AI instructions generated successfully.",
+      draft,
+      appointment: buildAppointmentResponse(appointment),
+      context: {
+        managedDoctor: buildUserOption(managedDoctor)
+      }
+    });
+  } catch (err) {
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    const message = err instanceof Error ? err.message : "Failed to generate appointment instructions";
     return res.status(statusCode).json({ error: message });
   }
 }
