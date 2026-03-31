@@ -472,6 +472,78 @@ async function syncPatientNextAppointment(patientId) {
   );
 }
 
+async function syncPatientFollowUpDueAt(patientId) {
+  if (!patientId) return;
+
+  const openTasks = await CrmTask.find({
+    patient: patientId,
+    status: { $in: ["pending", "in_progress"] },
+    $or: [{ followUpAt: { $ne: null } }, { dueAt: { $ne: null } }]
+  })
+    .select("followUpAt dueAt")
+    .lean();
+
+  let nextFollowUpAt = null;
+
+  for (const task of openTasks) {
+    const checkpoints = [task?.followUpAt, task?.dueAt]
+      .map((value) => (value ? new Date(value) : null))
+      .filter((value) => value && !Number.isNaN(value.getTime()));
+
+    for (const checkpoint of checkpoints) {
+      if (!nextFollowUpAt || checkpoint.getTime() < nextFollowUpAt.getTime()) {
+        nextFollowUpAt = checkpoint;
+      }
+    }
+  }
+
+  await PatientProfile.findOneAndUpdate(
+    { user: patientId },
+    {
+      $set: {
+        followUpDueAt: nextFollowUpAt,
+        lastInteractionAt: new Date()
+      }
+    },
+    { new: true, upsert: true }
+  );
+}
+
+function buildAppointmentFollowUpTime(scheduledAt) {
+  return new Date(new Date(scheduledAt).getTime() - 30 * 60 * 1000);
+}
+
+async function createPreAppointmentFollowUpTask({ appointment, patient, doctor, nurseId, reason }) {
+  if (!appointment?._id || !patient?._id || !doctor?._id || !nurseId) return null;
+
+  const followUpAt = buildAppointmentFollowUpTime(appointment.scheduledAt);
+  const appointmentLabel = formatDateTimeLabel(appointment.scheduledAt);
+  const descriptionParts = [`Call patient 30 minutes before the appointment scheduled for ${appointmentLabel}.`];
+
+  if (reason) {
+    descriptionParts.push(`Appointment reason: ${reason}.`);
+  }
+
+  const task = await CrmTask.create({
+    patient: patient._id,
+    assignedNurse: nurseId,
+    assignedDoctor: doctor._id,
+    title: `Pre-appointment follow up with ${patient.name}`,
+    description: descriptionParts.join(" "),
+    category: "appointment_confirmation",
+    status: "pending",
+    priority: "medium",
+    dueAt: followUpAt,
+    followUpAt,
+    escalationRequired: false,
+    callOutcome: "pending",
+    linkedAppointment: appointment._id
+  });
+
+  await syncPatientFollowUpDueAt(patient._id);
+  return task;
+}
+
 async function findOrCreateDoctorProfile(doctorId) {
   const existingProfile = await DoctorProfile.findOne({ user: doctorId }).lean();
   if (existingProfile) return existingProfile;
@@ -696,12 +768,14 @@ function buildAppointmentEmailContent({ actionType, appointment, managedDoctor }
   const patientName = appointment?.patient?.name || "Patient";
   const appointmentTypeLabel = formatAppointmentTypeLabel(appointment.appointmentType);
   const subjectByAction = {
+    booked: `Your appointment has been booked for ${appointmentDateLabel}`,
     reminder: `Appointment reminder for ${appointmentDateLabel}`,
     confirmation: `Appointment confirmation for ${appointmentDateLabel}`,
     instructions: `Preparation instructions for your appointment on ${appointmentDateLabel}`
   };
 
   const messageByAction = {
+    booked: `Dear ${patientName},\n\nYour ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} has been booked for ${appointmentDateLabel}.\nReason: ${appointment.reason || "General consultation"}.\nStatus: ${formatAppointmentStatusLabel(appointment.status)}.\n\nPlease keep this email for your reference and contact the clinic if you need any changes.`,
     reminder: `Dear ${patientName},\n\nThis is a reminder for your ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} on ${appointmentDateLabel}.\nReason: ${appointment.reason || "General consultation"}.\n\nPlease arrive on time and contact the clinic if you need any changes.`,
     confirmation: `Dear ${patientName},\n\nYour ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} is confirmed for ${appointmentDateLabel}.\nReason: ${appointment.reason || "General consultation"}.\n\nPlease keep this message for your reference.`,
     instructions: `Dear ${patientName},\n\nHere are the preparation instructions for your ${appointmentTypeLabel.toLowerCase()} with Dr. ${doctorName} on ${appointmentDateLabel}.\n${appointment.preparationInstructions || "Please arrive 10 minutes early and carry any previous reports, prescription files, and ID proof."}\n\nRequired items:\n- Documents required: ${appointment.documentsRequired ? "Yes" : "No"}\n- Reports required: ${appointment.reportsRequired ? "Yes" : "No"}\n- Pre-visit update required: ${appointment.preVisitUpdateRequired ? "Yes" : "No"}`
@@ -992,7 +1066,54 @@ export async function scheduleNurseAppointmentController(req, res) {
       ]
     });
 
+    await createPreAppointmentFollowUpTask({
+      appointment,
+      patient,
+      doctor,
+      nurseId,
+      reason
+    });
     await syncPatientNextAppointment(patient._id);
+
+    const warnings = [];
+    if (!patient.email) {
+      warnings.push("Patient email is not available for appointment booking email.");
+    } else {
+      try {
+        const emailContent = buildAppointmentEmailContent({
+          actionType: "booked",
+          appointment: {
+            ...appointment.toObject(),
+            patient,
+            doctor
+          },
+          managedDoctor: doctor
+        });
+
+        await sendAdminCustomEmail({
+          toEmail: patient.email,
+          name: patient.name,
+          role: "patient",
+          subject: emailContent.subject,
+          message: emailContent.message,
+          summary: emailContent.summary,
+          userNumber: patient.userNumber
+        });
+
+        appointment.confirmationSentAt = new Date();
+        appointment.lastReminderType = "booked";
+        addAppointmentNote(appointment, {
+          type: "confirmation",
+          channel: "email",
+          message: "Appointment booking email sent to patient.",
+          createdBy: nurseId,
+          metadata: { actionType: "booked" }
+        });
+        await appointment.save();
+      } catch (emailError) {
+        warnings.push(emailError instanceof Error ? emailError.message : "Failed to send appointment booking email");
+      }
+    }
 
     const populatedAppointment = await Appointment.findById(appointment._id)
       .populate("patient", "name email phone status userNumber")
@@ -1002,8 +1123,9 @@ export async function scheduleNurseAppointmentController(req, res) {
       .lean();
 
     return res.status(201).json({
-      message: "Appointment scheduled successfully.",
-      appointment: buildAppointmentResponse(populatedAppointment)
+      message: warnings.length === 0 ? "Appointment scheduled successfully." : "Appointment scheduled with warnings.",
+      appointment: buildAppointmentResponse(populatedAppointment),
+      warnings
     });
   } catch (err) {
     const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
@@ -1058,16 +1180,7 @@ export async function scheduleNurseFollowUpController(req, res) {
       callOutcome: "pending"
     });
 
-    await PatientProfile.findOneAndUpdate(
-      { user: patient._id },
-      {
-        $set: {
-          followUpDueAt: followUpAt,
-          lastInteractionAt: new Date()
-        }
-      },
-      { new: true, upsert: true }
-    );
+    await syncPatientFollowUpDueAt(patient._id);
 
     const populatedTask = await CrmTask.findById(task._id)
       .populate("patient", "name email phone status userNumber")
