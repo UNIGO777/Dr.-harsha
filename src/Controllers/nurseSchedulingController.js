@@ -856,6 +856,7 @@ export async function listDoctorAppointmentSlotsController(req, res) {
     const requesterId = req?.user?._id?.toString?.() || "";
     const requestedDoctorId = normalizeString(req?.query?.doctorId);
     const requestedPatientId = normalizeString(req?.query?.patientId);
+    const excludeAppointmentId = normalizeString(req?.query?.excludeAppointmentId);
     const doctorId = requesterRole === "doctor" ? requesterId : requestedDoctorId;
     const date = normalizeString(req?.query?.date);
 
@@ -880,7 +881,7 @@ export async function listDoctorAppointmentSlotsController(req, res) {
       requestedPatientId ? findUserByRole(requestedPatientId, "patient", "patient") : Promise.resolve(null)
     ]);
     const [slotData, appointmentHistory] = await Promise.all([
-      buildDoctorAppointmentSlots({ doctor, dateValue: date }),
+      buildDoctorAppointmentSlots({ doctor, dateValue: date, excludeAppointmentId }),
       requestedPatientId ? listPastAppointments({ patientId: patient?._id, doctorId: doctor._id, limit: 6 }) : Promise.resolve([])
     ]);
 
