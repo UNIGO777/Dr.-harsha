@@ -36,12 +36,14 @@ import {
   sendUserEmailController,
   validateUserEmailAttachments
 } from "../Controllers/emailControllers.js";
+import { searchMedicineNamesController } from "../Controllers/clinicalTablesController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { roleMiddleware } from "../middlewares/roleMiddleware.js";
 
 export const userRouter = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 5, fileSize: 10 * 1024 * 1024 } });
 
+userRouter.get("/clinical-tables/medicines/search", searchMedicineNamesController);
 userRouter.get("/", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listUsersController);
 userRouter.get("/appointment-slots", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listDoctorAppointmentSlotsController);
 userRouter.get("/doctor/schedule", authMiddleware, roleMiddleware(["doctor"]), getDoctorScheduleController);
