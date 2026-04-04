@@ -4,7 +4,14 @@ import { Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
 import { DoctorProfile } from "../Models/DoctorProfile.js";
 import { NurseProfile } from "../Models/NurseProfile.js";
-import { PATIENT_SERVICE_OPTIONS, PATIENT_TAG_OPTIONS, PatientProfile } from "../Models/PatientProfile.js";
+import {
+  PATIENT_MEDICATION_DURATION_UNITS,
+  PATIENT_MEDICATION_FOOD_TIMING_OPTIONS,
+  PATIENT_MEDICATION_TIME_SLOTS,
+  PATIENT_SERVICE_OPTIONS,
+  PATIENT_TAG_OPTIONS,
+  PatientProfile
+} from "../Models/PatientProfile.js";
 import { createUserNotification } from "./notificationController.js";
 import { sendUserActiveEmail, sendUserBlockedEmail, sendUserOnboardingEmail } from "../utils/emailService.js";
 import { canCreateUser } from "../utils/permissions.js";
@@ -225,6 +232,59 @@ function buildPatientProfileNoteResponse(note) {
   };
 }
 
+function buildPatientMedicationResponse(medication) {
+  if (!medication?._id || !medication?.medicineName) return null;
+
+  return {
+    id: medication._id.toString(),
+    medicineName: medication.medicineName,
+    patientId: medication?.patient?._id ? medication.patient._id.toString() : medication?.patient?.toString?.() || "",
+    doctor: buildCareTeamMemberResponse(medication.doctor),
+    addedBy: buildCareTeamMemberResponse(medication.addedBy),
+    durationValue: typeof medication.durationValue === "number" ? medication.durationValue : null,
+    durationUnit: medication.durationUnit || "",
+    timeSlots: Array.isArray(medication.timeSlots) ? medication.timeSlots : [],
+    foodTiming: medication.foodTiming || "",
+    additionalInfo: medication.additionalInfo || "",
+    createdAt: medication.createdAt || null,
+    updatedAt: medication.updatedAt || null
+  };
+}
+
+function parseMedicationDurationValue(value) {
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(numericValue) || numericValue < 1 || numericValue > 3650) {
+    throw createRequestError("durationValue must be a whole number between 1 and 3650");
+  }
+
+  return numericValue;
+}
+
+function parseMedicationTimeSlots(value) {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw createRequestError("At least one medication time slot is required");
+  }
+
+  const normalizedTimeSlots = Array.from(
+    new Set(
+      value
+        .map((entry) => normalizeString(entry).toLowerCase())
+        .filter(Boolean)
+    )
+  );
+
+  if (normalizedTimeSlots.length === 0) {
+    throw createRequestError("At least one medication time slot is required");
+  }
+
+  const invalidTimeSlot = normalizedTimeSlots.find((entry) => !PATIENT_MEDICATION_TIME_SLOTS.includes(entry));
+  if (invalidTimeSlot) {
+    throw createRequestError("Invalid medication time slot");
+  }
+
+  return normalizedTimeSlots;
+}
+
 function ensurePatientProfileNotesHaveIds(patientProfile) {
   if (!Array.isArray(patientProfile?.notes)) return false;
 
@@ -371,6 +431,83 @@ function buildScopedPatientProfileQuery({ nurseId, managedDoctorId, patientId })
     assignedDoctors: managedDoctorId,
     assignedNurses: nurseId
   };
+}
+
+async function resolvePatientMedicationAccess({ actor }) {
+  const actorId = actor?.user?._id;
+  const actorRole = normalizeString(actor?.user?.role).toLowerCase();
+  const patientId = ensureObjectId(actor?.params?.patientId, "patientId");
+
+  if (!actorId) {
+    throw createRequestError("Unauthorized", 401);
+  }
+
+  if (actorRole === "nurse") {
+    const managedDoctor = await getManagedDoctorForNurse(actorId);
+    const patientProfile = await PatientProfile.findOne(
+      buildScopedPatientProfileQuery({
+        nurseId: actorId,
+        managedDoctorId: managedDoctor._id,
+        patientId
+      })
+    );
+
+    if (!patientProfile?._id) {
+      throw createRequestError("Patient not found in your assignment", 404);
+    }
+
+    return {
+      patientProfile,
+      doctorId: managedDoctor._id,
+      patientId
+    };
+  }
+
+  if (actorRole === "doctor") {
+    const patientProfile = await PatientProfile.findOne({
+      user: patientId,
+      assignedDoctors: actorId
+    });
+
+    if (!patientProfile?._id) {
+      throw createRequestError("Patient not found in your assignment", 404);
+    }
+
+    return {
+      patientProfile,
+      doctorId: actorId,
+      patientId
+    };
+  }
+
+  throw createRequestError("Unauthorized", 403);
+}
+
+async function listMedicationNameOptions() {
+  const medicationNameGroups = await PatientProfile.aggregate([
+    { $unwind: "$medications" },
+    {
+      $project: {
+        medicineName: {
+          $trim: {
+            input: { $ifNull: ["$medications.medicineName", ""] }
+          }
+        }
+      }
+    },
+    { $match: { medicineName: { $ne: "" } } },
+    {
+      $group: {
+        _id: { $toLower: "$medicineName" },
+        medicineName: { $first: "$medicineName" }
+      }
+    },
+    { $sort: { medicineName: 1 } }
+  ]);
+
+  return medicationNameGroups
+    .map((entry) => normalizeString(entry?.medicineName))
+    .filter(Boolean);
 }
 
 function buildPatientManagementSummary(patients) {
@@ -920,6 +1057,8 @@ export async function getNursePatientProfileController(req, res) {
       .populate("assignedDoctors", "name email phone status userNumber")
       .populate("assignedNurses", "name email phone status userNumber")
       .populate("notes.createdBy", "name email phone status userNumber")
+      .populate("medications.doctor", "name email phone status userNumber")
+      .populate("medications.addedBy", "name email phone status userNumber")
       .lean();
 
     if (!patientProfile?.user?._id) {
@@ -993,6 +1132,12 @@ export async function getNursePatientProfileController(req, res) {
         notes: Array.isArray(patientProfile.notes)
           ? patientProfile.notes.map((note) => buildPatientProfileNoteResponse(note)).filter(Boolean)
           : [],
+        medications: Array.isArray(patientProfile.medications)
+          ? [...patientProfile.medications]
+              .sort((left, right) => new Date(right?.createdAt || 0).getTime() - new Date(left?.createdAt || 0).getTime())
+              .map((medication) => buildPatientMedicationResponse(medication))
+              .filter(Boolean)
+          : [],
         futureFollowUps: futureFollowUps.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
         followUpHistory: followUpHistory.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
         upcomingAppointments: upcomingAppointments.map((appointment) => buildPatientAppointmentHistoryResponse(appointment, patientProfile.user)).filter(Boolean),
@@ -1061,6 +1206,94 @@ export async function addNursePatientProfileNoteController(req, res) {
   } catch (err) {
     const statusCode = err?.statusCode || 500;
     const message = err instanceof Error ? err.message : "Failed to add patient note";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function addPatientMedicationController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const medicineName = normalizeString(req?.body?.medicineName);
+    const durationUnit = normalizeString(req?.body?.durationUnit).toLowerCase();
+    const foodTiming = normalizeString(req?.body?.foodTiming).toLowerCase();
+    const additionalInfo = normalizeString(req?.body?.additionalInfo);
+
+    if (!medicineName) {
+      return res.status(400).json({ error: "medicineName is required" });
+    }
+
+    if (!PATIENT_MEDICATION_DURATION_UNITS.includes(durationUnit)) {
+      return res.status(400).json({ error: "Invalid durationUnit" });
+    }
+
+    if (!PATIENT_MEDICATION_FOOD_TIMING_OPTIONS.includes(foodTiming)) {
+      return res.status(400).json({ error: "Invalid foodTiming" });
+    }
+
+    const durationValue = parseMedicationDurationValue(req?.body?.durationValue);
+    const timeSlots = parseMedicationTimeSlots(req?.body?.timeSlots);
+    const { patientProfile, doctorId, patientId } = await resolvePatientMedicationAccess({ actor: req });
+
+    patientProfile.medications.push({
+      medicineName,
+      patient: patientId,
+      doctor: doctorId,
+      addedBy: req.user._id,
+      durationValue,
+      durationUnit,
+      timeSlots,
+      foodTiming,
+      additionalInfo
+    });
+    patientProfile.lastInteractionAt = new Date();
+    await patientProfile.save();
+
+    const updatedProfile = await PatientProfile.findById(patientProfile._id)
+      .populate("medications.doctor", "name email phone status userNumber")
+      .populate("medications.addedBy", "name email phone status userNumber")
+      .lean();
+    const latestMedication = Array.isArray(updatedProfile?.medications)
+      ? updatedProfile.medications[updatedProfile.medications.length - 1]
+      : null;
+
+    return res.status(201).json({
+      message: "Medication added successfully.",
+      medication: buildPatientMedicationResponse(latestMedication)
+    });
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const message = err instanceof Error ? err.message : "Failed to add medication";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function getPatientMedicationsController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const { patientProfile } = await resolvePatientMedicationAccess({ actor: req });
+    const profileWithMedications = await PatientProfile.findById(patientProfile._id)
+      .populate("medications.patient", "name email phone status userNumber")
+      .populate("medications.doctor", "name email phone status userNumber")
+      .populate("medications.addedBy", "name email phone status userNumber")
+      .lean();
+
+    const medications = Array.isArray(profileWithMedications?.medications)
+      ? [...profileWithMedications.medications]
+          .sort((left, right) => new Date(right?.createdAt || 0).getTime() - new Date(left?.createdAt || 0).getTime())
+          .map((medication) => buildPatientMedicationResponse(medication))
+          .filter(Boolean)
+      : [];
+    const medicineOptions = await listMedicationNameOptions();
+
+    return res.status(200).json({
+      medications,
+      medicineOptions
+    });
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const message = err instanceof Error ? err.message : "Failed to fetch medications";
     return res.status(statusCode).json({ error: message });
   }
 }

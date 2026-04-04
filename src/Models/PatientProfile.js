@@ -2,6 +2,9 @@ import mongoose from "mongoose";
 
 const PATIENT_SERVICE_OPTIONS = ["Health check", "Diabetic", "Senior citizen", "Men", "Women", "Advanced programs", "Diet course"];
 const PATIENT_TAG_OPTIONS = ["Stroke", "Diabetes", "Heart health", "BP", "Cholesterol", "Kidney", "Knee pain", "Other"];
+const PATIENT_MEDICATION_TIME_SLOTS = ["morning", "afternoon", "evening", "night"];
+const PATIENT_MEDICATION_DURATION_UNITS = ["days", "weeks", "months"];
+const PATIENT_MEDICATION_FOOD_TIMING_OPTIONS = ["before_food", "after_food"];
 
 const patientProfileNoteSchema = new mongoose.Schema(
   {
@@ -11,6 +14,33 @@ const patientProfileNoteSchema = new mongoose.Schema(
     updatedAt: { type: Date, default: null }
   },
   { _id: true }
+);
+
+const patientMedicationSchema = new mongoose.Schema(
+  {
+    medicineName: { type: String, trim: true, required: true },
+    patient: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    doctor: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    addedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    durationValue: { type: Number, required: true, min: 1, max: 3650 },
+    durationUnit: {
+      type: String,
+      enum: PATIENT_MEDICATION_DURATION_UNITS,
+      required: true
+    },
+    timeSlots: {
+      type: [String],
+      enum: PATIENT_MEDICATION_TIME_SLOTS,
+      default: []
+    },
+    foodTiming: {
+      type: String,
+      enum: PATIENT_MEDICATION_FOOD_TIMING_OPTIONS,
+      required: true
+    },
+    additionalInfo: { type: String, trim: true, default: "" }
+  },
+  { _id: true, timestamps: true }
 );
 
 const patientProfileSchema = new mongoose.Schema(
@@ -41,6 +71,7 @@ const patientProfileSchema = new mongoose.Schema(
     nextAppointmentAt: { type: Date, default: null },
     followUpDueAt: { type: Date, default: null },
     notes: { type: [patientProfileNoteSchema], default: [] },
+    medications: { type: [patientMedicationSchema], default: [] },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null }
   },
   { timestamps: true }
@@ -48,4 +79,10 @@ const patientProfileSchema = new mongoose.Schema(
 
 export const PatientProfile =
   mongoose.models.PatientProfile || mongoose.model("PatientProfile", patientProfileSchema);
-export { PATIENT_SERVICE_OPTIONS, PATIENT_TAG_OPTIONS };
+export {
+  PATIENT_MEDICATION_DURATION_UNITS,
+  PATIENT_MEDICATION_FOOD_TIMING_OPTIONS,
+  PATIENT_MEDICATION_TIME_SLOTS,
+  PATIENT_SERVICE_OPTIONS,
+  PATIENT_TAG_OPTIONS
+};

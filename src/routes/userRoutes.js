@@ -1,8 +1,10 @@
 import express from "express";
 import multer from "multer";
 import {
+  addPatientMedicationController,
   addNursePatientProfileNoteController,
   createUserController,
+  getPatientMedicationsController,
   getNursePatientProfileController,
   listNursePatientManagementController,
   listUsersController,
@@ -45,6 +47,7 @@ userRouter.get("/appointment-slots", authMiddleware, roleMiddleware(["super_admi
 userRouter.get("/doctor/schedule", authMiddleware, roleMiddleware(["doctor"]), getDoctorScheduleController);
 userRouter.get("/nurse/patients", authMiddleware, roleMiddleware(["nurse"]), listNursePatientManagementController);
 userRouter.get("/nurse/patients/:patientId/profile", authMiddleware, roleMiddleware(["nurse"]), getNursePatientProfileController);
+userRouter.get("/patients/:patientId/medications", authMiddleware, roleMiddleware(["doctor", "nurse"]), getPatientMedicationsController);
 userRouter.get("/nurse/appointments", authMiddleware, roleMiddleware(["nurse"]), listNurseUpcomingAppointmentsController);
 userRouter.get("/nurse/crm", authMiddleware, roleMiddleware(["nurse"]), listNurseCrmTasksController);
 userRouter.get("/broadcast-recipients", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listBroadcastRecipientsController);
@@ -55,6 +58,7 @@ userRouter.post("/nurse/crm/draft", authMiddleware, roleMiddleware(["nurse"]), g
 userRouter.post("/nurse/appointments", authMiddleware, roleMiddleware(["nurse"]), scheduleNurseAppointmentController);
 userRouter.post("/nurse/appointments/:appointmentId/instruction-draft", authMiddleware, roleMiddleware(["nurse"]), generateNurseAppointmentInstructionDraftController);
 userRouter.post("/nurse/follow-ups", authMiddleware, roleMiddleware(["nurse"]), scheduleNurseFollowUpController);
+userRouter.post("/patients/:patientId/medications", authMiddleware, roleMiddleware(["doctor", "nurse"]), addPatientMedicationController);
 userRouter.post("/nurse/patients/:patientId/notes", authMiddleware, roleMiddleware(["nurse"]), addNursePatientProfileNoteController);
 userRouter.post("/broadcast-email/draft", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), generateBroadcastEmailDraftController);
 userRouter.post(
