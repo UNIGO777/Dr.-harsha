@@ -1,5 +1,8 @@
 import mongoose from "mongoose";
 
+const PATIENT_SERVICE_OPTIONS = ["Health check", "Diabetic", "Senior citizen", "Men", "Women", "Advanced programs", "Diet course"];
+const PATIENT_TAG_OPTIONS = ["Stroke", "Diabetes", "Heart health", "BP", "Cholesterol", "Kidney", "Knee pain", "Other"];
+
 const patientProfileNoteSchema = new mongoose.Schema(
   {
     content: { type: String, trim: true, required: true },
@@ -20,6 +23,20 @@ const patientProfileSchema = new mongoose.Schema(
       enum: ["low", "medium", "high", "critical"],
       default: "medium"
     },
+    age: { type: Number, default: null, min: 0, max: 130 },
+    reference: { type: String, trim: true, default: "" },
+    address: { type: String, trim: true, default: "" },
+    secondaryPhone: { type: String, trim: true, default: "" },
+    services: {
+      type: [String],
+      enum: PATIENT_SERVICE_OPTIONS,
+      default: []
+    },
+    tags: {
+      type: [String],
+      enum: PATIENT_TAG_OPTIONS,
+      default: []
+    },
     lastInteractionAt: { type: Date, default: null },
     nextAppointmentAt: { type: Date, default: null },
     followUpDueAt: { type: Date, default: null },
@@ -31,3 +48,4 @@ const patientProfileSchema = new mongoose.Schema(
 
 export const PatientProfile =
   mongoose.models.PatientProfile || mongoose.model("PatientProfile", patientProfileSchema);
+export { PATIENT_SERVICE_OPTIONS, PATIENT_TAG_OPTIONS };

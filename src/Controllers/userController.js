@@ -4,7 +4,7 @@ import { Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
 import { DoctorProfile } from "../Models/DoctorProfile.js";
 import { NurseProfile } from "../Models/NurseProfile.js";
-import { PatientProfile } from "../Models/PatientProfile.js";
+import { PATIENT_SERVICE_OPTIONS, PATIENT_TAG_OPTIONS, PatientProfile } from "../Models/PatientProfile.js";
 import { createUserNotification } from "./notificationController.js";
 import { sendUserActiveEmail, sendUserBlockedEmail, sendUserOnboardingEmail } from "../utils/emailService.js";
 import { canCreateUser } from "../utils/permissions.js";
@@ -14,6 +14,8 @@ import {
   buildUserOnboardingWhatsappMessage,
   sendWhatsappMessage
 } from "../utils/Whatsapp.js";
+
+const TERMINAL_APPOINTMENT_STATUSES = ["completed", "cancelled", "no_show"];
 
 function buildUserResponse(user) {
   return {
@@ -38,6 +40,41 @@ function createRequestError(message, statusCode = 400) {
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function parsePatientTextField(value) {
+  if (value === undefined || value === null) return { hasValue: false, value: "" };
+  return { hasValue: true, value: normalizeString(value) };
+}
+
+function normalizePatientSelection(values, allowedValues) {
+  if (!Array.isArray(values)) return [];
+
+  const allowedValueMap = new Map(allowedValues.map((value) => [value.toLowerCase(), value]));
+
+  return Array.from(
+    new Set(
+      values
+        .map((value) => normalizeString(value))
+        .map((value) => allowedValueMap.get(value.toLowerCase()) || "")
+        .filter(Boolean)
+    )
+  );
+}
+
+function parsePatientAge(value, { allowEmpty = true } = {}) {
+  if (value === undefined) return { hasValue: false, value: null };
+  if (value === null || value === "") {
+    if (allowEmpty) return { hasValue: true, value: null };
+    throw createRequestError("Age is required");
+  }
+
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(numericValue) || numericValue < 0 || numericValue > 130) {
+    throw createRequestError("Age must be a whole number between 0 and 130");
+  }
+
+  return { hasValue: true, value: numericValue };
 }
 
 function buildCareTeamMemberResponse(user) {
@@ -113,7 +150,13 @@ async function buildUsersResponse(users) {
           : [],
         assignedNurses: Array.isArray(profile.assignedNurses)
           ? profile.assignedNurses.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean)
-          : []
+          : [],
+        age: typeof profile?.age === "number" ? profile.age : null,
+        reference: normalizeString(profile?.reference),
+        address: normalizeString(profile?.address),
+        secondaryPhone: normalizeString(profile?.secondaryPhone),
+        services: Array.isArray(profile?.services) ? profile.services : [],
+        tags: Array.isArray(profile?.tags) ? profile.tags : []
       }
     ])
   );
@@ -124,7 +167,13 @@ async function buildUsersResponse(users) {
     weeklyAvailability: user.role === "doctor" ? doctorSettingsByUserId.get(user._id.toString())?.weeklyAvailability || {} : {},
     assignedDoctor: user.role === "nurse" ? assignmentByUserId.get(user._id.toString()) || null : null,
     assignedDoctors: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.assignedDoctors || [] : [],
-    assignedNurses: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.assignedNurses || [] : []
+    assignedNurses: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.assignedNurses || [] : [],
+    age: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.age ?? null : null,
+    reference: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.reference || "" : "",
+    address: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.address || "" : "",
+    secondaryPhone: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.secondaryPhone || "" : "",
+    services: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.services || [] : [],
+    tags: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.tags || [] : []
   }));
 }
 
@@ -151,6 +200,12 @@ function buildPatientManagementResponse({ profile, managedDoctor }) {
     priority,
     assignedDoctors,
     assignedNurses,
+    age: typeof profile?.age === "number" ? profile.age : null,
+    reference: normalizeString(profile?.reference),
+    address: normalizeString(profile?.address),
+    secondaryPhone: normalizeString(profile?.secondaryPhone),
+    services: Array.isArray(profile?.services) ? profile.services : [],
+    tags: Array.isArray(profile?.tags) ? profile.tags : [],
     managedDoctor: buildCareTeamMemberResponse(managedDoctor),
     lastInteractionAt: profile?.lastInteractionAt || user?.updatedAt || profile?.updatedAt || user?.createdAt || null,
     nextAppointmentAt,
@@ -190,6 +245,18 @@ function ensurePatientProfileNotesHaveIds(patientProfile) {
   });
 
   return hasChanges;
+}
+
+function buildAppointmentNoteResponse(note) {
+  if (!note?._id || !note?.message) return null;
+
+  return {
+    id: note._id.toString(),
+    message: note.message,
+    kind: note.kind || "internal",
+    createdAt: note.createdAt || null,
+    createdBy: buildCareTeamMemberResponse(note.createdBy)
+  };
 }
 
 function buildPatientFollowUpHistoryResponse(task) {
@@ -241,7 +308,7 @@ function buildPatientFollowUpHistoryResponse(task) {
   };
 }
 
-function buildPatientAppointmentHistoryResponse(appointment) {
+function buildPatientAppointmentHistoryResponse(appointment, patientUser = null) {
   if (!appointment?._id) return null;
 
   return {
@@ -250,10 +317,24 @@ function buildPatientAppointmentHistoryResponse(appointment) {
     endsAt: appointment.endsAt || null,
     slotMinutes: appointment.slotMinutes || null,
     reason: appointment.reason || "",
+    appointmentType: appointment.appointmentType || "in_person",
     status: appointment.status || "scheduled",
     outcome: appointment.outcome || "",
+    preparationInstructions: appointment.preparationInstructions || "",
+    documentsRequired: Boolean(appointment.documentsRequired),
+    reportsRequired: Boolean(appointment.reportsRequired),
+    preVisitUpdateRequired: Boolean(appointment.preVisitUpdateRequired),
+    confirmationSentAt: appointment.confirmationSentAt || null,
+    lastReminderAt: appointment.lastReminderAt || null,
+    lastReminderType: appointment.lastReminderType || "",
+    checkedInAt: appointment.checkedInAt || null,
+    completedAt: appointment.completedAt || null,
+    cancelledAt: appointment.cancelledAt || null,
+    noShowAt: appointment.noShowAt || null,
+    patient: buildSchedulingOption(appointment.patient) || buildSchedulingOption(patientUser),
     doctor: buildCareTeamMemberResponse(appointment.doctor),
     scheduledBy: buildCareTeamMemberResponse(appointment.scheduledBy),
+    notes: Array.isArray(appointment.notes) ? appointment.notes.map((note) => buildAppointmentNoteResponse(note)).filter(Boolean) : [],
     createdAt: appointment.createdAt,
     updatedAt: appointment.updatedAt
   };
@@ -334,7 +415,13 @@ function matchesPatientManagementSearch(patient, search) {
     patient?.name,
     patient?.email,
     patient?.phone,
+    patient?.secondaryPhone,
     patient?.userNumber != null ? String(patient.userNumber) : "",
+    patient?.age != null ? String(patient.age) : "",
+    patient?.reference,
+    patient?.address,
+    ...(Array.isArray(patient?.services) ? patient.services : []),
+    ...(Array.isArray(patient?.tags) ? patient.tags : []),
     ...(Array.isArray(patient?.assignedDoctors) ? patient.assignedDoctors.map((doctor) => doctor?.name || "") : []),
     ...(Array.isArray(patient?.assignedNurses) ? patient.assignedNurses.map((nurse) => nurse?.name || "") : [])
   ];
@@ -587,6 +674,12 @@ export async function createUserController(req, res) {
     const assignedDoctorId = typeof req?.body?.assignedDoctorId === "string" ? req.body.assignedDoctorId.trim() : "";
     const assignedDoctorIds = req?.body?.assignedDoctorIds;
     const assignedNurseIds = req?.body?.assignedNurseIds;
+    const patientAge = parsePatientAge(req?.body?.age);
+    const patientReference = parsePatientTextField(req?.body?.reference);
+    const patientAddress = parsePatientTextField(req?.body?.address);
+    const patientSecondaryPhone = parsePatientTextField(req?.body?.secondaryPhone);
+    const patientServices = normalizePatientSelection(req?.body?.services, PATIENT_SERVICE_OPTIONS);
+    const patientTags = normalizePatientSelection(req?.body?.tags, PATIENT_TAG_OPTIONS);
 
     if (!name || !email || !password || !role) {
       return res.status(400).json({ error: "name, email, password, role are required" });
@@ -615,7 +708,13 @@ export async function createUserController(req, res) {
         user: user._id,
         createdBy,
         assignedDoctors: patientCareTeam?.assignedDoctorIds || [],
-        assignedNurses: patientCareTeam?.assignedNurseIds || []
+        assignedNurses: patientCareTeam?.assignedNurseIds || [],
+        age: patientAge.value,
+        reference: patientReference.value,
+        address: patientAddress.value,
+        secondaryPhone: patientSecondaryPhone.value,
+        services: patientServices,
+        tags: patientTags
       });
     }
     const { notifications, notificationWarnings } = await sendOnboardingNotifications(user);
@@ -639,7 +738,13 @@ export async function createUserController(req, res) {
         ...buildUserResponse(user),
         assignedDoctor: assignedDoctor ? buildCareTeamMemberResponse(assignedDoctor) : null,
         assignedDoctors: patientCareTeam?.doctors?.map((doctor) => buildCareTeamMemberResponse(doctor)).filter(Boolean) || [],
-        assignedNurses: patientCareTeam?.nurses?.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean) || []
+        assignedNurses: patientCareTeam?.nurses?.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean) || [],
+        age: role === "patient" ? patientAge.value : null,
+        reference: role === "patient" ? patientReference.value : "",
+        address: role === "patient" ? patientAddress.value : "",
+        secondaryPhone: role === "patient" ? patientSecondaryPhone.value : "",
+        services: role === "patient" ? patientServices : [],
+        tags: role === "patient" ? patientTags : []
       }
     });
   } catch (err) {
@@ -822,7 +927,7 @@ export async function getNursePatientProfileController(req, res) {
     }
 
     const now = new Date();
-    const [futureFollowUps, followUpHistory, appointmentHistory] = await Promise.all([
+    const [futureFollowUps, followUpHistory, upcomingAppointments, appointmentHistory] = await Promise.all([
       CrmTask.find({
         patient: patientProfile.user._id,
         assignedDoctor: managedDoctor._id,
@@ -859,7 +964,21 @@ export async function getNursePatientProfileController(req, res) {
       Appointment.find({
         patient: patientProfile.user._id,
         doctor: managedDoctor._id,
-        scheduledAt: { $lt: now }
+        scheduledAt: { $gte: now },
+        status: { $nin: TERMINAL_APPOINTMENT_STATUSES }
+      })
+        .populate("doctor", "name email phone status userNumber")
+        .populate("scheduledBy", "name email phone status userNumber")
+        .sort({ scheduledAt: 1, updatedAt: -1 })
+        .limit(8)
+        .lean(),
+      Appointment.find({
+        patient: patientProfile.user._id,
+        doctor: managedDoctor._id,
+        $or: [
+          { scheduledAt: { $lt: now } },
+          { status: { $in: TERMINAL_APPOINTMENT_STATUSES } }
+        ]
       })
         .populate("doctor", "name email phone status userNumber")
         .populate("scheduledBy", "name email phone status userNumber")
@@ -876,7 +995,9 @@ export async function getNursePatientProfileController(req, res) {
           : [],
         futureFollowUps: futureFollowUps.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
         followUpHistory: followUpHistory.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
-        appointmentHistory: appointmentHistory.map((appointment) => buildPatientAppointmentHistoryResponse(appointment)).filter(Boolean)
+        upcomingAppointments: upcomingAppointments.map((appointment) => buildPatientAppointmentHistoryResponse(appointment, patientProfile.user)).filter(Boolean),
+        pastAppointments: appointmentHistory.map((appointment) => buildPatientAppointmentHistoryResponse(appointment, patientProfile.user)).filter(Boolean),
+        appointmentHistory: appointmentHistory.map((appointment) => buildPatientAppointmentHistoryResponse(appointment, patientProfile.user)).filter(Boolean)
       }
     });
   } catch (err) {
@@ -1048,6 +1169,18 @@ export async function updateUserController(req, res) {
     const assignedNurseIds = req?.body?.assignedNurseIds;
     const hasAllowCustomSchedule = Object.prototype.hasOwnProperty.call(req?.body || {}, "allowCustomSchedule");
     const allowCustomSchedule = Boolean(req?.body?.allowCustomSchedule);
+    const hasAge = Object.prototype.hasOwnProperty.call(req?.body || {}, "age");
+    const hasReference = Object.prototype.hasOwnProperty.call(req?.body || {}, "reference");
+    const hasAddress = Object.prototype.hasOwnProperty.call(req?.body || {}, "address");
+    const hasSecondaryPhone = Object.prototype.hasOwnProperty.call(req?.body || {}, "secondaryPhone");
+    const hasServices = Object.prototype.hasOwnProperty.call(req?.body || {}, "services");
+    const hasTags = Object.prototype.hasOwnProperty.call(req?.body || {}, "tags");
+    const patientAge = parsePatientAge(req?.body?.age);
+    const patientReference = parsePatientTextField(req?.body?.reference);
+    const patientAddress = parsePatientTextField(req?.body?.address);
+    const patientSecondaryPhone = parsePatientTextField(req?.body?.secondaryPhone);
+    const patientServices = normalizePatientSelection(req?.body?.services, PATIENT_SERVICE_OPTIONS);
+    const patientTags = normalizePatientSelection(req?.body?.tags, PATIENT_TAG_OPTIONS);
 
     if (status && !USER_STATUSES_ENUM.includes(status)) {
       return res.status(400).json({ error: "Invalid status" });
@@ -1085,7 +1218,7 @@ export async function updateUserController(req, res) {
       hasChanges = true;
     }
 
-    if (user.role === "patient" && (hasAssignedDoctorIds || hasAssignedNurseIds)) {
+    if (user.role === "patient" && (hasAssignedDoctorIds || hasAssignedNurseIds || hasAge || hasReference || hasAddress || hasSecondaryPhone || hasServices || hasTags)) {
       const existingProfile = await PatientProfile.findOne({ user: user._id }).lean();
       const patientCareTeam = await resolvePatientCareTeam({
         creator: req.user,
@@ -1107,7 +1240,13 @@ export async function updateUserController(req, res) {
         {
           $set: {
             assignedDoctors: patientCareTeam.assignedDoctorIds,
-            assignedNurses: patientCareTeam.assignedNurseIds
+            assignedNurses: patientCareTeam.assignedNurseIds,
+            ...(hasAge ? { age: patientAge.value } : {}),
+            ...(hasReference ? { reference: patientReference.value } : {}),
+            ...(hasAddress ? { address: patientAddress.value } : {}),
+            ...(hasSecondaryPhone ? { secondaryPhone: patientSecondaryPhone.value } : {}),
+            ...(hasServices ? { services: patientServices } : {}),
+            ...(hasTags ? { tags: patientTags } : {})
           }
         },
         { upsert: true, new: true }
