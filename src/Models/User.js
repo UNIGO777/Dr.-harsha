@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 
 const USER_ROLES = ["super_admin", "doctor", "nurse", "patient"];
 const USER_STATUSES = ["active", "blocked"];
+const USER_GENDERS = ["male", "female", "other"];
 const USER_NUMBER_COUNTER_KEY = "user_number";
 const USER_NUMBER_START = 100000;
 
@@ -41,6 +42,7 @@ const userSchema = new mongoose.Schema(
     role: { type: String, enum: USER_ROLES, required: true },
     userNumber: { type: Number, unique: true, index: true },
     phone: { type: String, trim: true, default: "" },
+    gender: { type: String, enum: ["", ...USER_GENDERS], default: "" },
     status: { type: String, enum: USER_STATUSES, default: "active" },
     loginOtp: { type: otpSchema, default: () => ({}) },
     emailUpdateOtp: { type: otpSchema, default: () => ({}) },
@@ -87,3 +89,4 @@ userSchema.methods.comparePassword = async function comparePassword(plain) {
 export const User = mongoose.models.User || mongoose.model("User", userSchema);
 export const USER_ROLES_ENUM = USER_ROLES;
 export const USER_STATUSES_ENUM = USER_STATUSES;
+export const USER_GENDERS_ENUM = USER_GENDERS;

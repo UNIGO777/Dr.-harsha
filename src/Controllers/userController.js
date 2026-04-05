@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { User, USER_ROLES_ENUM, USER_STATUSES_ENUM } from "../Models/User.js";
+import { User, USER_GENDERS_ENUM, USER_ROLES_ENUM, USER_STATUSES_ENUM } from "../Models/User.js";
 import { Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
 import { DoctorProfile } from "../Models/DoctorProfile.js";
@@ -32,6 +32,7 @@ function buildUserResponse(user) {
     email: user.email,
     role: user.role,
     phone: user.phone,
+    gender: user.gender || "",
     status: user.status,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -47,6 +48,22 @@ function createRequestError(message, statusCode = 400) {
 
 function normalizeString(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeUserGender(value, { allowEmpty = true } = {}) {
+  if (value === undefined) return { hasValue: false, value: "" };
+
+  const normalizedValue = normalizeString(value).toLowerCase();
+  if (!normalizedValue) {
+    if (allowEmpty) return { hasValue: true, value: "" };
+    throw createRequestError("Gender is required");
+  }
+
+  if (!USER_GENDERS_ENUM.includes(normalizedValue)) {
+    throw createRequestError("Gender must be male, female, or other");
+  }
+
+  return { hasValue: true, value: normalizedValue };
 }
 
 function parsePatientTextField(value) {
@@ -807,6 +824,7 @@ export async function createUserController(req, res) {
     const password = typeof req?.body?.password === "string" ? req.body.password : "";
     const role = typeof req?.body?.role === "string" ? req.body.role.trim() : "";
     const phone = typeof req?.body?.phone === "string" ? req.body.phone.trim() : "";
+    const gender = normalizeUserGender(req?.body?.gender);
     const status = typeof req?.body?.status === "string" ? req.body.status.trim() : "active";
     const assignedDoctorId = typeof req?.body?.assignedDoctorId === "string" ? req.body.assignedDoctorId.trim() : "";
     const assignedDoctorIds = req?.body?.assignedDoctorIds;
@@ -835,7 +853,7 @@ export async function createUserController(req, res) {
     const patientCareTeam =
       role === "patient" ? await resolvePatientCareTeam({ creator, creatorRole, assignedDoctorIds, assignedNurseIds }) : null;
 
-    const user = await User.create({ name, email, password, role, phone, status });
+    const user = await User.create({ name, email, password, role, phone, gender: gender.value, status });
 
     const createdBy = creator?._id || null;
     if (role === "doctor") await DoctorProfile.create({ user: user._id, createdBy });
@@ -1393,6 +1411,8 @@ export async function updateUserController(req, res) {
 
     const name = typeof req?.body?.name === "string" ? req.body.name.trim() : undefined;
     const phone = typeof req?.body?.phone === "string" ? req.body.phone.trim() : undefined;
+    const hasGender = Object.prototype.hasOwnProperty.call(req?.body || {}, "gender");
+    const gender = normalizeUserGender(req?.body?.gender);
     const status = typeof req?.body?.status === "string" ? req.body.status.trim() : undefined;
     const hasAssignedDoctorId = Object.prototype.hasOwnProperty.call(req?.body || {}, "assignedDoctorId");
     const assignedDoctorId = typeof req?.body?.assignedDoctorId === "string" ? req.body.assignedDoctorId.trim() : "";
@@ -1433,6 +1453,11 @@ export async function updateUserController(req, res) {
 
     if (phone !== undefined) {
       user.phone = phone;
+      hasChanges = true;
+    }
+
+    if (hasGender && gender.hasValue) {
+      user.gender = gender.value;
       hasChanges = true;
     }
 

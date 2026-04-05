@@ -6,7 +6,19 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "nodemon src/index.js"
+  },
+  "nodemonConfig": {
+    "watch": [
+      "src"
+    ],
+    "ext": "js,mjs,cjs,json",
+    "ignore": [
+      "node_modules/**",
+      ".git/**",
+      "README.md",
+      "package-lock.json"
+    ]
   },
   "dependencies": {
     "bcrypt": "^5.1.1",

@@ -64,8 +64,8 @@ export function buildAuthPayload(user) {
     email: user.email,
     role: user.role,
     phone: user.phone,
+    gender: user.gender || "",
     status: user.status,
     lastLoginAt: user.lastLoginAt || null
   };
 }
-
