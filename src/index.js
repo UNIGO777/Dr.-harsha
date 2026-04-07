@@ -1,4 +1,3 @@
-import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import path from "node:path";
@@ -15,13 +14,8 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
-const corsOptions = {
-  origin: true,
-  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-  exposedHeaders: ["x-request-id"],
-  credentials: true,
-  optionsSuccessStatus: 204
-};
+const corsMethods = "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS";
+const corsHeaders = "Origin, X-Requested-With, Content-Type, Accept, Authorization, x-request-id";
 
 function safePreview(value, maxChars = 4000) {
   try {
@@ -52,8 +46,21 @@ process.on("uncaughtException", (err) => {
 
 const app = express();
 
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
+app.use((req, res, next) => {
+  const requestOrigin = req.headers.origin;
+  res.setHeader("Access-Control-Allow-Origin", requestOrigin || "*");
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Methods", corsMethods);
+  res.setHeader("Access-Control-Expose-Headers", "x-request-id");
+  res.setHeader("Access-Control-Allow-Headers", req.headers["access-control-request-headers"] || corsHeaders);
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
 app.use(express.json({ limit: "5mb" }));
 
 app.use((req, res, next) => {
