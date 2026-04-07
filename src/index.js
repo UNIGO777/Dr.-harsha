@@ -15,6 +15,41 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
+function parseAllowedOrigins(value) {
+  return String(value || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+const allowedOrigins = [
+  ...parseAllowedOrigins(process.env.CORS_ORIGINS),
+  ...parseAllowedOrigins(process.env.FRONTEND_URL),
+  ...parseAllowedOrigins(process.env.FRONTEND_ORIGIN),
+  ...parseAllowedOrigins(process.env.CLIENT_URL)
+];
+
+const corsOptions = {
+  origin(origin, callback) {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin ${origin} is not allowed by CORS`));
+  },
+  methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "x-request-id"],
+  exposedHeaders: ["x-request-id"],
+  credentials: true,
+  optionsSuccessStatus: 204
+};
+
 function safePreview(value, maxChars = 4000) {
   try {
     const text =
@@ -44,7 +79,8 @@ process.on("uncaughtException", (err) => {
 
 const app = express();
 
-app.use(cors());
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "5mb" }));
 
 app.use((req, res, next) => {
