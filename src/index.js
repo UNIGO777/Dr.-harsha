@@ -15,36 +15,9 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
-function parseAllowedOrigins(value) {
-  return String(value || "")
-    .split(",")
-    .map((origin) => origin.trim())
-    .filter(Boolean);
-}
-
-const allowedOrigins = [
-  ...parseAllowedOrigins(process.env.CORS_ORIGINS),
-  ...parseAllowedOrigins(process.env.FRONTEND_URL),
-  ...parseAllowedOrigins(process.env.FRONTEND_ORIGIN),
-  ...parseAllowedOrigins(process.env.CLIENT_URL)
-];
-
 const corsOptions = {
-  origin(origin, callback) {
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
-
-    if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
-      callback(null, true);
-      return;
-    }
-
-    callback(new Error(`Origin ${origin} is not allowed by CORS`));
-  },
+  origin: true,
   methods: ["GET", "HEAD", "PUT", "PATCH", "POST", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "x-request-id"],
   exposedHeaders: ["x-request-id"],
   credentials: true,
   optionsSuccessStatus: 204
