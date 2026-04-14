@@ -37,8 +37,13 @@ import {
   validateUserEmailAttachments
 } from "../Controllers/emailControllers.js";
 import {
+  createPatientReportController,
+  deletePatientReportDocumentController,
+  downloadPatientReportDocumentController,
   getPatientReportController,
-  savePatientReportController
+  listPatientReportsController,
+  savePatientReportController,
+  uploadPatientReportDocumentsController
 } from "../Controllers/patientReportController.js";
 import { searchMedicineNamesController } from "../Controllers/clinicalTablesController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
@@ -46,6 +51,7 @@ import { roleMiddleware } from "../middlewares/roleMiddleware.js";
 
 export const userRouter = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { files: 5, fileSize: 10 * 1024 * 1024 } });
+const reportDocumentUpload = multer({ storage: multer.memoryStorage(), limits: { files: 20, fileSize: 15 * 1024 * 1024 } });
 
 userRouter.get("/clinical-tables/medicines/search", searchMedicineNamesController);
 userRouter.get("/", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listUsersController);
@@ -53,7 +59,11 @@ userRouter.get("/appointment-slots", authMiddleware, roleMiddleware(["super_admi
 userRouter.get("/doctor/schedule", authMiddleware, roleMiddleware(["doctor"]), getDoctorScheduleController);
 userRouter.get("/nurse/patients", authMiddleware, roleMiddleware(["nurse"]), listNursePatientManagementController);
 userRouter.get("/nurse/patients/:patientId/profile", authMiddleware, roleMiddleware(["nurse"]), getNursePatientProfileController);
-userRouter.get("/nurse/patients/:patientId/report", authMiddleware, roleMiddleware(["nurse"]), getPatientReportController);
+userRouter.get("/nurse/patients/:patientId/report", authMiddleware, roleMiddleware(["nurse", "doctor"]), getPatientReportController);
+userRouter.get("/patients/:patientId/reports", authMiddleware, roleMiddleware(["nurse", "doctor"]), listPatientReportsController);
+userRouter.get("/patients/:patientId/reports/:reportId", authMiddleware, roleMiddleware(["nurse", "doctor"]), getPatientReportController);
+userRouter.get("/patients/:patientId/report/documents/:documentId", authMiddleware, roleMiddleware(["nurse", "doctor"]), downloadPatientReportDocumentController);
+userRouter.get("/patients/:patientId/reports/:reportId/documents/:documentId", authMiddleware, roleMiddleware(["nurse", "doctor"]), downloadPatientReportDocumentController);
 userRouter.get("/patients/:patientId/medications", authMiddleware, roleMiddleware(["doctor", "nurse"]), getPatientMedicationsController);
 userRouter.get("/nurse/appointments", authMiddleware, roleMiddleware(["nurse"]), listNurseUpcomingAppointmentsController);
 userRouter.get("/nurse/crm", authMiddleware, roleMiddleware(["nurse"]), listNurseCrmTasksController);
@@ -67,6 +77,21 @@ userRouter.post("/nurse/appointments/:appointmentId/instruction-draft", authMidd
 userRouter.post("/nurse/follow-ups", authMiddleware, roleMiddleware(["nurse"]), scheduleNurseFollowUpController);
 userRouter.post("/patients/:patientId/medications", authMiddleware, roleMiddleware(["doctor", "nurse"]), addPatientMedicationController);
 userRouter.post("/nurse/patients/:patientId/notes", authMiddleware, roleMiddleware(["nurse"]), addNursePatientProfileNoteController);
+userRouter.post("/nurse/patients/:patientId/reports", authMiddleware, roleMiddleware(["nurse"]), createPatientReportController);
+userRouter.post(
+  "/nurse/patients/:patientId/report/documents",
+  authMiddleware,
+  roleMiddleware(["nurse"]),
+  reportDocumentUpload.array("documents", 20),
+  uploadPatientReportDocumentsController
+);
+userRouter.post(
+  "/nurse/patients/:patientId/reports/:reportId/documents",
+  authMiddleware,
+  roleMiddleware(["nurse"]),
+  reportDocumentUpload.array("documents", 20),
+  uploadPatientReportDocumentsController
+);
 userRouter.post("/broadcast-email/draft", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), generateBroadcastEmailDraftController);
 userRouter.post(
   "/broadcast-email",
@@ -80,6 +105,19 @@ userRouter.patch("/doctor/schedule", authMiddleware, roleMiddleware(["doctor"]),
 userRouter.patch("/nurse/appointments/:appointmentId", authMiddleware, roleMiddleware(["nurse"]), updateNurseAppointmentController);
 userRouter.patch("/nurse/patients/:patientId/notes/:noteId", authMiddleware, roleMiddleware(["nurse"]), updateNursePatientProfileNoteController);
 userRouter.patch("/nurse/patients/:patientId/report", authMiddleware, roleMiddleware(["nurse"]), savePatientReportController);
+userRouter.patch("/nurse/patients/:patientId/reports/:reportId", authMiddleware, roleMiddleware(["nurse"]), savePatientReportController);
+userRouter.delete(
+  "/nurse/patients/:patientId/report/documents/:documentId",
+  authMiddleware,
+  roleMiddleware(["nurse"]),
+  deletePatientReportDocumentController
+);
+userRouter.delete(
+  "/nurse/patients/:patientId/reports/:reportId/documents/:documentId",
+  authMiddleware,
+  roleMiddleware(["nurse"]),
+  deletePatientReportDocumentController
+);
 userRouter.patch("/:userId", authMiddleware, roleMiddleware(["super_admin"]), updateUserController);
 userRouter.patch("/nurse/crm/:taskId", authMiddleware, roleMiddleware(["nurse"]), updateNurseCrmTaskController);
 userRouter.post("/:userId/generate-email", authMiddleware, roleMiddleware(["super_admin"]), generateUserEmailDraftController);

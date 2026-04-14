@@ -10,9 +10,26 @@ const patientReportStepSnapshotSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const patientReportUploadedDocumentSchema = new mongoose.Schema(
+  {
+    stepId: { type: String, trim: true, required: true, index: true },
+    originalName: { type: String, trim: true, required: true },
+    storedName: { type: String, trim: true, required: true },
+    relativePath: { type: String, trim: true, required: true },
+    checksum: { type: String, trim: true, required: true },
+    mimeType: { type: String, trim: true, default: "" },
+    size: { type: Number, min: 0, default: 0 },
+    usedForExtraction: { type: Boolean, default: true },
+    uploadedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    uploadedAt: { type: Date, default: Date.now }
+  },
+  { _id: true }
+);
+
 const patientReportSchema = new mongoose.Schema(
   {
-    patient: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true, index: true },
+    patient: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    reportNumber: { type: Number, required: true, min: 1 },
     assignedNurse: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     assignedDoctor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
     reportValues: { type: mongoose.Schema.Types.Mixed, default: {} },
@@ -64,6 +81,10 @@ const patientReportSchema = new mongoose.Schema(
       of: patientReportStepSnapshotSchema,
       default: {}
     },
+    uploadedDocuments: {
+      type: [patientReportUploadedDocumentSchema],
+      default: []
+    },
     activeStepId: { type: String, trim: true, default: "" },
     lastSavedStepId: { type: String, trim: true, default: "" },
     lastSavedAt: { type: Date, default: null },
@@ -72,6 +93,9 @@ const patientReportSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+patientReportSchema.index({ patient: 1, createdAt: -1 });
+patientReportSchema.index({ patient: 1, reportNumber: 1 }, { unique: true });
 
 export const PatientReport =
   mongoose.models.PatientReport || mongoose.model("PatientReport", patientReportSchema);
