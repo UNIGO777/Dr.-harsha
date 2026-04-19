@@ -46,6 +46,7 @@ import {
   uploadPatientReportDocumentsController
 } from "../Controllers/patientReportController.js";
 import { searchMedicineNamesController } from "../Controllers/clinicalTablesController.js";
+import { getNurseDashboardController } from "../Controllers/nurseDashboardController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { roleMiddleware } from "../middlewares/roleMiddleware.js";
 
@@ -65,6 +66,7 @@ userRouter.get("/patients/:patientId/reports/:reportId", authMiddleware, roleMid
 userRouter.get("/patients/:patientId/report/documents/:documentId", authMiddleware, roleMiddleware(["nurse", "doctor"]), downloadPatientReportDocumentController);
 userRouter.get("/patients/:patientId/reports/:reportId/documents/:documentId", authMiddleware, roleMiddleware(["nurse", "doctor"]), downloadPatientReportDocumentController);
 userRouter.get("/patients/:patientId/medications", authMiddleware, roleMiddleware(["doctor", "nurse"]), getPatientMedicationsController);
+userRouter.get("/nurse/dashboard", authMiddleware, roleMiddleware(["nurse"]), getNurseDashboardController);
 userRouter.get("/nurse/appointments", authMiddleware, roleMiddleware(["nurse"]), listNurseUpcomingAppointmentsController);
 userRouter.get("/nurse/crm", authMiddleware, roleMiddleware(["nurse"]), listNurseCrmTasksController);
 userRouter.get("/broadcast-recipients", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listBroadcastRecipientsController);
