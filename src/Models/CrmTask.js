@@ -58,4 +58,8 @@ const crmTaskSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+crmTaskSchema.index({ patient: 1, status: 1, followUpAt: 1 });
+crmTaskSchema.index({ patient: 1, assignedDoctor: 1, status: 1 });
+crmTaskSchema.index({ assignedNurse: 1, status: 1, dueAt: 1 });
+
 export const CrmTask = mongoose.models.CrmTask || mongoose.model("CrmTask", crmTaskSchema);

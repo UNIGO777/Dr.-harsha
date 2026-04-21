@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import express from "express";
+import compression from "compression";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -61,7 +62,10 @@ app.use((req, res, next) => {
 
   next();
 });
+app.use(compression());
 app.use(express.json({ limit: "5mb" }));
+
+const LOG_RESPONSE_BODIES = process.env.NODE_ENV !== "production";
 
 app.use((req, res, next) => {
   const requestId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : String(Date.now());
@@ -72,18 +76,21 @@ app.use((req, res, next) => {
   const url = req.originalUrl || req.url;
 
   let responseBody;
-  const originalJson = res.json.bind(res);
-  const originalSend = res.send.bind(res);
 
-  res.json = (body) => {
-    responseBody = body;
-    return originalJson(body);
-  };
+  if (LOG_RESPONSE_BODIES) {
+    const originalJson = res.json.bind(res);
+    const originalSend = res.send.bind(res);
 
-  res.send = (body) => {
-    if (responseBody === undefined) responseBody = body;
-    return originalSend(body);
-  };
+    res.json = (body) => {
+      responseBody = body;
+      return originalJson(body);
+    };
+
+    res.send = (body) => {
+      if (responseBody === undefined) responseBody = body;
+      return originalSend(body);
+    };
+  }
 
   console.log(`[${requestId}] -> ${method} ${url}`);
 
@@ -94,9 +101,11 @@ app.use((req, res, next) => {
 
     if (status >= 400) {
       console.error(line);
-      if (responseBody !== undefined) {
+      if (LOG_RESPONSE_BODIES && responseBody !== undefined) {
         console.error(`[${requestId}] response: ${safePreview(responseBody)}`);
       }
+    } else if (ms > 3000) {
+      console.warn(`${line} [SLOW]`);
     } else {
       console.log(line);
     }
@@ -152,10 +161,11 @@ async function start() {
       console.log(`API listening on http://localhost:${port}`);
     });
 
-    const REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+    const REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
     server.setTimeout(REQUEST_TIMEOUT_MS);
     server.requestTimeout = REQUEST_TIMEOUT_MS;
     server.headersTimeout = REQUEST_TIMEOUT_MS + 10 * 1000;
+    server.keepAliveTimeout = 65 * 1000;
   } catch (err) {
     console.error("Failed to start server:", err);
     process.exit(1);

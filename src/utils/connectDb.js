@@ -5,7 +5,14 @@ export async function connectDb({ mongoUri } = {}) {
   if (!uri) return { connected: false, reason: "Missing MONGODB_URI/MONGO_URI" };
   if (mongoose.connection.readyState === 1) return { connected: true };
 
-  await mongoose.connect(uri, {});
+  await mongoose.connect(uri, {
+    maxPoolSize: 20,
+    minPoolSize: 5,
+    serverSelectionTimeoutMS: 10_000,
+    socketTimeoutMS: 45_000,
+    connectTimeoutMS: 10_000,
+    maxIdleTimeMS: 30_000,
+  });
   return { connected: mongoose.connection.readyState === 1 };
 }
 

@@ -77,6 +77,8 @@ const patientProfileSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+patientProfileSchema.index({ assignedDoctors: 1, assignedNurses: 1 });
+
 export const PatientProfile =
   mongoose.models.PatientProfile || mongoose.model("PatientProfile", patientProfileSchema);
 export {
