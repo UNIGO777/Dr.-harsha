@@ -521,10 +521,9 @@ async function generateExerciseAssessmentSummaryWithAi({ openai, provider, patie
     null;
 
   const summary = typeof parsed?.summary === "string" ? parsed.summary : "";
-  const counselling = typeof parsed?.counselling === "string" ? parsed.counselling : "";
   const safetyFlags = Array.isArray(parsed?.safetyFlags) ? parsed.safetyFlags.filter((s) => typeof s === "string" && s.trim()) : [];
 
-  const payload = { summary, counselling, safetyFlags };
+  const payload = { summary, safetyFlags };
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -2096,6 +2095,12 @@ function normalizeLiverHealthIncoming(body) {
   const heightCm = parseOptionalNumberLoose(b.heightCm);
   const weightKg = parseOptionalNumberLoose(b.weightKg);
   const waistCm = parseOptionalNumberLoose(b.waistCm);
+  const astIU_L = parseOptionalNumberLoose(b.astIU_L);
+  const altIU_L = parseOptionalNumberLoose(b.altIU_L);
+  const plateletCount10e9_L = parseOptionalNumberLoose(b.plateletCount10e9_L);
+  const albuminG_dL = parseOptionalNumberLoose(b.albuminG_dL);
+  const triglyceridesMg_dL = parseOptionalNumberLoose(b.triglyceridesMg_dL);
+  const ggtIU_L = parseOptionalNumberLoose(b.ggtIU_L);
   const diabetesRaw = typeof b.diabetesOrIfg === "string" ? b.diabetesOrIfg.trim().toLowerCase() : "";
   const diabetesOrIfg =
     diabetesRaw === "yes" || diabetesRaw === "true" || diabetesRaw === "1"
@@ -2111,7 +2116,13 @@ function normalizeLiverHealthIncoming(body) {
     heightCm: Number.isFinite(heightCm) && heightCm > 0 ? heightCm : null,
     weightKg: Number.isFinite(weightKg) && weightKg > 0 ? weightKg : null,
     waistCm: Number.isFinite(waistCm) && waistCm > 0 ? waistCm : null,
-    diabetesOrIfg
+    diabetesOrIfg,
+    astIU_L: Number.isFinite(astIU_L) ? astIU_L : null,
+    altIU_L: Number.isFinite(altIU_L) ? altIU_L : null,
+    plateletCount10e9_L: Number.isFinite(plateletCount10e9_L) ? plateletCount10e9_L : null,
+    albuminG_dL: Number.isFinite(albuminG_dL) ? albuminG_dL : null,
+    triglyceridesMg_dL: Number.isFinite(triglyceridesMg_dL) ? triglyceridesMg_dL : null,
+    ggtIU_L: Number.isFinite(ggtIU_L) ? ggtIU_L : null
   };
   return { patient };
 }
@@ -2631,6 +2642,18 @@ async function generateLungFunctionWithAi({ openai, provider, patient, extracted
     lungAgeYears,
     formula
   };
+
+  const normalizeTextBlock = (section) => {
+    const source = section && typeof section === "object" ? section : {};
+    return {
+      findings: typeof source.findings === "string" ? source.findings : "",
+      impression: typeof source.impression === "string" ? source.impression : "",
+      summary: typeof source.summary === "string" ? source.summary : ""
+    };
+  };
+
+  payload.chestXray = normalizeTextBlock(payload.chestXray);
+  payload.hrct = normalizeTextBlock(payload.hrct);
 
   if (debug) payload.raw = raw;
   return payload;

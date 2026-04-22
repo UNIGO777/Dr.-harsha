@@ -7,7 +7,6 @@ Keep it concise and safe.
 
 export const EXERCISE_ASSESSMENT_SCHEMA_HINT = `{
   "summary": "",
-  "counselling": "",
   "safetyFlags": []
 }`;
 
@@ -16,7 +15,7 @@ export function buildExerciseAssessmentUserPrompt({ patient, assessment, compute
   const a = assessment && typeof assessment === "object" ? assessment : {};
   const c = computed && typeof computed === "object" ? computed : {};
 
-  return `Using the provided exercise assessment inputs and computed metrics, write a short patient-friendly summary and brief counselling.
+  return `Using the provided exercise assessment inputs and computed metrics, write a short patient-friendly summary.
 If there are any safety concerns, include them in safetyFlags as short strings.
 
 Patient:
@@ -31,4 +30,3 @@ ${JSON.stringify(c)}
 Return ONLY valid JSON in this exact shape:
 ${EXERCISE_ASSESSMENT_SCHEMA_HINT}`;
 }
-

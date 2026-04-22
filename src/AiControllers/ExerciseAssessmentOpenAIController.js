@@ -43,8 +43,7 @@ export function createExerciseAssessmentOpenAIHandler(getContext) {
         patient: normalized.patient,
         assessment: normalized.assessment,
         computed: { ...computed, safetyFlags: mergedFlags },
-        summary: typeof ai?.summary === "string" ? ai.summary : "",
-        counselling: typeof ai?.counselling === "string" ? ai.counselling : ""
+        summary: typeof ai?.summary === "string" ? ai.summary : ""
       };
       if (debugAi && typeof ai?.raw === "string") payload.raw = ai.raw;
       res.json(payload);
@@ -54,4 +53,3 @@ export function createExerciseAssessmentOpenAIHandler(getContext) {
     }
   };
 }
-

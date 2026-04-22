@@ -41,11 +41,13 @@ export const LUNG_FUNCTION_SCHEMA_HINT = `{
   },
   "chestXray": {
     "findings": "",
-    "impression": ""
+    "impression": "",
+    "summary": ""
   },
   "hrct": {
     "findings": "",
-    "impression": ""
+    "impression": "",
+    "summary": ""
   }
 }`;
 
@@ -64,6 +66,8 @@ Rules:
 - fev1FvcPercent should be a percent number (example: 75.99). Do not return a ratio here.
 - Also extract the full table when present (parameter, observed, predicted, % predicted, units, notes).
 - Extract chest X-ray and HRCT findings/impression only if explicitly included in the uploaded documents.
+- For chest X-ray and HRCT, also provide a short neutral summary based only on the same extracted report content.
+- Do not make a second interpretation beyond the report. The summary must stay consistent with the extracted findings/impression.
 
 Patient context (for lung age calculation; may be incomplete):
 ${JSON.stringify(p)}
