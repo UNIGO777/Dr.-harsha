@@ -2127,6 +2127,109 @@ function normalizeLiverHealthIncoming(body) {
   return { patient };
 }
 
+function computeLiverScoresFromPatient(patient) {
+  const ageCandidate = Number.isFinite(patient?.age) ? patient.age : null;
+  const heightCmCandidate = Number.isFinite(patient?.heightCm) ? patient.heightCm : null;
+  const weightKgCandidate = Number.isFinite(patient?.weightKg) ? patient.weightKg : null;
+  const waistCmCandidate = Number.isFinite(patient?.waistCm) ? patient.waistCm : null;
+  const bmiCandidate =
+    computeBmiKgM2({ heightCm: heightCmCandidate, weightKg: weightKgCandidate });
+  const diabetesCandidate = typeof patient?.diabetesOrIfg === "boolean" ? patient.diabetesOrIfg : null;
+  const astCandidate = Number.isFinite(patient?.astIU_L) ? patient.astIU_L : null;
+  const altCandidate = Number.isFinite(patient?.altIU_L) ? patient.altIU_L : null;
+  const plateletCandidate = Number.isFinite(patient?.plateletCount10e9_L) ? patient.plateletCount10e9_L : null;
+  const albuminCandidate = Number.isFinite(patient?.albuminG_dL) ? patient.albuminG_dL : null;
+  const triglyceridesCandidate = Number.isFinite(patient?.triglyceridesMg_dL) ? patient.triglyceridesMg_dL : null;
+  const ggtCandidate = Number.isFinite(patient?.ggtIU_L) ? patient.ggtIU_L : null;
+
+  const astAltRatio =
+    Number.isFinite(astCandidate) && astCandidate > 0 && Number.isFinite(altCandidate) && altCandidate > 0
+      ? astCandidate / altCandidate
+      : null;
+
+  const nfsScore =
+    Number.isFinite(ageCandidate) &&
+    Number.isFinite(bmiCandidate) &&
+    typeof diabetesCandidate === "boolean" &&
+    Number.isFinite(astAltRatio) &&
+    Number.isFinite(plateletCandidate) &&
+    Number.isFinite(albuminCandidate)
+      ? -1.675 +
+        0.037 * ageCandidate +
+        0.094 * bmiCandidate +
+        1.13 * (diabetesCandidate ? 1 : 0) -
+        0.99 * astAltRatio -
+        0.013 * plateletCandidate -
+        0.66 * albuminCandidate
+      : null;
+
+  const yForFli =
+    Number.isFinite(triglyceridesCandidate) &&
+    triglyceridesCandidate > 0 &&
+    Number.isFinite(bmiCandidate) &&
+    Number.isFinite(ggtCandidate) &&
+    ggtCandidate > 0 &&
+    Number.isFinite(waistCmCandidate)
+      ? 0.953 * Math.log(triglyceridesCandidate) +
+        0.139 * bmiCandidate +
+        0.718 * Math.log(ggtCandidate) +
+        0.053 * waistCmCandidate -
+        15.745
+      : null;
+  const fliScore =
+    Number.isFinite(yForFli) ? (Math.exp(yForFli) / (1 + Math.exp(yForFli))) * 100 : null;
+
+  const fib4Score =
+    Number.isFinite(ageCandidate) &&
+    Number.isFinite(astCandidate) &&
+    astCandidate > 0 &&
+    Number.isFinite(altCandidate) &&
+    altCandidate > 0 &&
+    Number.isFinite(plateletCandidate) &&
+    plateletCandidate > 0
+      ? (ageCandidate * astCandidate) / (plateletCandidate * Math.sqrt(altCandidate))
+      : null;
+
+  const bardScore =
+    Number.isFinite(astAltRatio) && Number.isFinite(bmiCandidate) && typeof diabetesCandidate === "boolean"
+      ? (astAltRatio >= 0.8 ? 2 : 0) + (bmiCandidate >= 28 ? 1 : 0) + (diabetesCandidate ? 1 : 0)
+      : null;
+
+  return {
+    inputs: {
+      ageYears: ageCandidate,
+      heightCm: Number.isFinite(heightCmCandidate) ? heightCmCandidate : null,
+      weightKg: Number.isFinite(weightKgCandidate) ? weightKgCandidate : null,
+      waistCircumferenceCm: Number.isFinite(waistCmCandidate) ? waistCmCandidate : null,
+      bmiKg_m2: Number.isFinite(bmiCandidate) ? bmiCandidate : null,
+      ifgOrDiabetes: typeof diabetesCandidate === "boolean" ? diabetesCandidate : null,
+      astIU_L: Number.isFinite(astCandidate) ? astCandidate : null,
+      altIU_L: Number.isFinite(altCandidate) ? altCandidate : null,
+      plateletCount10e9_L: Number.isFinite(plateletCandidate) ? plateletCandidate : null,
+      albuminG_dL: Number.isFinite(albuminCandidate) ? albuminCandidate : null,
+      triglyceridesMg_dL: Number.isFinite(triglyceridesCandidate) ? triglyceridesCandidate : null,
+      ggtIU_L: Number.isFinite(ggtCandidate) ? ggtCandidate : null,
+      astAltRatio: Number.isFinite(astAltRatio) ? astAltRatio : null
+    },
+    nfs: {
+      score: Number.isFinite(nfsScore) ? nfsScore : null,
+      interpretation: interpretNfs(nfsScore)
+    },
+    fli: {
+      score: Number.isFinite(fliScore) ? fliScore : null,
+      interpretation: interpretFli(fliScore)
+    },
+    fib4: {
+      score: Number.isFinite(fib4Score) ? fib4Score : null,
+      interpretation: interpretFib4(fib4Score)
+    },
+    bard: {
+      score: Number.isFinite(bardScore) ? bardScore : null,
+      interpretation: interpretBard(bardScore)
+    }
+  };
+}
+
 function normalizeEyeHealthIncoming(body) {
   const b = body && typeof body === "object" ? body : {};
   const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
@@ -7643,6 +7746,16 @@ gptRouter.post("/brain-health-part2", upload.none(), (req, res) => {
   }
 });
 
+gptRouter.post("/liver-health-scores", upload.none(), (req, res) => {
+  try {
+    const normalized = normalizeLiverHealthIncoming(req?.body);
+    const computed = computeLiverScoresFromPatient(normalized.patient);
+    res.json({ patient: normalized.patient, computed });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to calculate liver scores" });
+  }
+});
+
 gptRouter.post(
   "/brain-health-part2-extract",
   upload.fields([
@@ -7772,6 +7885,105 @@ gptRouter.post(
   ]),
   createDiabetesRiskHandler(getGptControllerContext)
 );
+
+gptRouter.post("/diabetes-annual-risk", async (req, res) => {
+  try {
+    const provider = normalizeAiProvider(req?.body?.provider);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+
+    const hba1c = parseOptionalNumberLoose(body.hba1c);
+    const fastingGlucose = parseOptionalNumberLoose(body.fastingGlucoseMgDl);
+    const fastingInsulin = parseOptionalNumberLoose(body.fastingInsulinUuMl);
+    const ldl = parseOptionalNumberLoose(body.ldlMgDl);
+    const homaIr = parseOptionalNumberLoose(body.homaIr);
+    const quicki = parseOptionalNumberLoose(body.quicki);
+    const idrsTotal = parseOptionalNumberLoose(body.idrsTotal);
+    const idrsRiskCategory = typeof body.idrsRiskCategory === "string" ? body.idrsRiskCategory : "";
+    const statinRecommendation = typeof body.statinRecommendation === "string" ? body.statinRecommendation : "";
+    const diabetes = typeof body.diabetes === "string" ? body.diabetes : "";
+    const diabetesYears = typeof body.diabetesSinceHowManyYears === "string" ? body.diabetesSinceHowManyYears : "";
+    const age = typeof body.age === "string" ? body.age : "";
+    const sex = typeof body.sex === "string" ? body.sex : "";
+    const bmi = typeof body.bmi === "string" ? body.bmi : "";
+    const hypertension = typeof body.hypertension === "string" ? body.hypertension : "";
+    const smoking = typeof body.smoking === "string" ? body.smoking : "";
+    const familyDiabetes = typeof body.familyDiabetes === "string" ? body.familyDiabetes : "";
+    const waistCm = parseOptionalNumberLoose(body.waistCm);
+
+    const dataLines = [
+      `Patient: age=${age}, sex=${sex}, BMI=${bmi}`,
+      `HbA1c: ${Number.isFinite(hba1c) ? hba1c + "%" : "not available"}`,
+      `Fasting glucose: ${Number.isFinite(fastingGlucose) ? fastingGlucose + " mg/dL" : "not available"}`,
+      `Fasting insulin: ${Number.isFinite(fastingInsulin) ? fastingInsulin + " µU/mL" : "not available"}`,
+      `LDL: ${Number.isFinite(ldl) ? ldl + " mg/dL" : "not available"}`,
+      `HOMA-IR: ${Number.isFinite(homaIr) ? homaIr : "not available"}`,
+      `QUICKI: ${Number.isFinite(quicki) ? quicki : "not available"}`,
+      `IDRS total score: ${Number.isFinite(idrsTotal) ? idrsTotal : "not available"}, risk category: ${idrsRiskCategory || "not available"}`,
+      `Waist circumference: ${Number.isFinite(waistCm) ? waistCm + " cm" : "not available"}`,
+      `Diabetes status: ${diabetes || "not available"}`,
+      `Diabetes duration: ${diabetesYears || "not available"}`,
+      `Hypertension: ${hypertension || "not available"}`,
+      `Smoking: ${smoking || "not available"}`,
+      `Family history of diabetes (parents): ${familyDiabetes || "not available"}`,
+      `Statin recommendation: ${statinRecommendation || "not available"}`
+    ].join("\n");
+
+    const systemPrompt = [
+      "You are a clinical decision support engine for diabetes risk assessment.",
+      "Given the patient's diabetes-related data, provide:",
+      "1. Annual risk of developing diabetes (as a concise label, e.g. 'Very low (<0.5%/yr)', '~5-10% per year', '10-25% per year', 'Already diabetic', etc.)",
+      "2. Clinical meaning (a brief 1-2 sentence clinical interpretation considering ALL the provided data, not just HbA1c)",
+      "",
+      "Return ONLY valid JSON. Do not add markdown. Do not add commentary.",
+      "JSON format:",
+      '{ "annualRisk": "...", "clinicalMeaning": "..." }'
+    ].join("\n");
+
+    const userPrompt = `Assess the annual risk of developing diabetes and provide clinical meaning based on these values:\n\n${dataLines}`;
+
+    let raw = "";
+    if (provider === "gemini") {
+      const response = await geminiGenerateContent({
+        parts: [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }],
+        model: process.env.Gemini_model || getGeminiModel(),
+        temperature: 0,
+        maxOutputTokens: 1024
+      });
+      raw = getTextFromGeminiGenerateContentResponse(response);
+    } else if (provider === "claude") {
+      const response = await anthropicCreateJsonMessage({
+        system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+        messages: [{ role: "user", content: userPrompt }],
+        model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+        temperature: 0,
+        maxTokens: 1024
+      });
+      raw = getTextFromAnthropicMessageResponse(response);
+    } else {
+      const openai = getOpenAIClient();
+      if (!openai) return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+          { role: "user", content: userPrompt }
+        ]
+      });
+      raw = completion.choices?.[0]?.message?.content ?? "";
+    }
+
+    const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? {};
+    const annualRisk = typeof parsed.annualRisk === "string" ? parsed.annualRisk : "";
+    const clinicalMeaning = typeof parsed.clinicalMeaning === "string" ? parsed.clinicalMeaning : "";
+
+    res.json({ result: { annualRisk, clinicalMeaning } });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
 
 gptRouter.post(
   "/women-health",

@@ -31,6 +31,10 @@ export function buildEyeHealthUserPrompt({ patient, extractedText }) {
 
   return [
     "Extract eye health / retina findings from the attached report(s)/image(s).",
+    "Extract these fields from the same report parsing pass: retinopathy (yes/no), type, severity, findings, impression, and other findings.",
+    "Only mark retinopathy as 'yes' if it is clearly stated in the report/image text.",
+    "If a field is not explicitly present, keep it empty.",
+    "Do not add diagnosis wording beyond what is stated in the uploaded report.",
     "Return JSON matching this schema:",
     EYE_HEALTH_SCHEMA_HINT,
     "",
@@ -46,4 +50,3 @@ export function buildEyeHealthUserPrompt({ patient, extractedText }) {
     typeof extractedText === "string" ? extractedText : ""
   ].join("\n");
 }
-

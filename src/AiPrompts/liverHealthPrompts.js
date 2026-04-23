@@ -58,10 +58,16 @@ Rules:
 - Do NOT add your own clinical advice or conclusions.
 - If a value is not explicitly present, keep it null/empty.
 - Prefer numbers for all numeric fields.
+- The patient context may already include diabetes/IFG and lab values from earlier steps. Use that context only for later score calculation outside this extraction. Do NOT invent or back-fill those values from context into the JSON unless the uploaded report itself explicitly shows them.
 - Keep plateletCount in units of 10^9/L when possible.
-- Extract elastography stiffness (kPa) and CAP if present.
-- Extract ultrasound findings/impression and whether fatty liver is mentioned.
+- Extract elastography stiffness (kPa) only if explicitly present in the uploaded report.
+- Extract CAP only if explicitly present in the uploaded report.
+- Extract elastography notes/remarks only if explicitly present in the uploaded report.
+- Extract ultrasound findings/impression only if explicitly present in the uploaded report.
+- For ultrasound findings/impression, preserve liver-specific wording exactly as much as possible.
+- Set mentionsFattyLiver only when the uploaded report clearly states fatty liver / steatosis or clearly states liver is normal.
 - If the report contains a table, also extract table rows as {parameter, observed, units, notes}.
+- Do NOT calculate BMI, AST/ALT ratio, NFS, FLI, FIB-4, or BARD in this extraction step.
 
 Patient context (may be incomplete):
 ${JSON.stringify(p)}
@@ -72,4 +78,3 @@ ${t}
 Return JSON in this exact shape:
 ${LIVER_HEALTH_SCHEMA_HINT}`;
 }
-
