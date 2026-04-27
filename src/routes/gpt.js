@@ -97,6 +97,10 @@ import {
 import { GENES_HEALTH_SYSTEM_PROMPT, buildGenesHealthUserPrompt } from "../AiPrompts/genesHealthPrompts.js";
 import { ALLERGY_PANELS_SYSTEM_PROMPT, buildAllergyPanelsUserPrompt } from "../AiPrompts/allergyPanelsPrompts.js";
 import {
+  CARDIAC_INVESTIGATIONS_SYSTEM_PROMPT,
+  buildCardiacInvestigationsUserPrompt
+} from "../AiPrompts/cardiacInvestigationsPrompts.js";
+import {
   BRAIN_HEALTH_ASSESSMENT_SYSTEM_PROMPT,
   BRAIN_HEALTH_PART2_EXTRACT_SYSTEM_PROMPT,
   buildBrainHealthAssessmentUserPrompt,
@@ -4430,12 +4434,8 @@ function extractFirstJsonObjectText(text) {
 }
 
 function isImageMime(mime) {
-  return (
-    mime === "image/png" ||
-    mime === "image/jpeg" ||
-    mime === "image/jpg" ||
-    mime === "image/webp"
-  );
+  const m = typeof mime === "string" ? mime : mime?.mimetype ?? "";
+  return String(m).toLowerCase().startsWith("image/");
 }
 
 function isPdfMime(input) {
@@ -8105,6 +8105,99 @@ gptRouter.post(
     { name: "file", maxCount: 1 }
   ]),
   createOtherAnalysisHandler(getGptControllerContext)
+);
+
+// ── Cardiac Investigations extraction ─────────────────────────────────────────
+gptRouter.post(
+  "/cardiac-investigations",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  async (req, res) => {
+    try {
+      const provider = getAiProviderFromReq(req);
+      const openai = provider === "openai" ? getOpenAIClient() : null;
+      if (provider === "openai" && !openai) {
+        return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+      }
+
+      const uploaded = collectUploadedFiles(req);
+      if (uploaded.length === 0) {
+        return res.status(400).json({ error: "Please upload at least one cardiac document." });
+      }
+
+      const pdfFiles = uploaded.filter((f) => f && isPdfMime(f));
+      const docxFiles = uploaded.filter((f) => f && isDocxMime(f));
+      const imageFiles = uploaded.filter((f) => f && isImageMime(f));
+
+      const pdfText = pdfFiles.length > 0 ? await extractPdfTextRawForPrompt(pdfFiles) : "";
+      const docxText = docxFiles.length > 0 ? await extractDocxTextRawForPrompt(docxFiles) : "";
+      const extractedText = `${pdfText}${docxText}`.trim();
+
+      const patientAge = typeof req.body?.patientAge === "string" ? req.body.patientAge.trim() : "";
+      const patientSex = typeof req.body?.patientSex === "string" ? req.body.patientSex.trim() : "";
+      const patientDiabetic = req.body?.patientDiabetic === "yes";
+
+      const systemPrompt = `${CARDIAC_INVESTIGATIONS_SYSTEM_PROMPT}${AI_OUTPUT_JSON_SUFFIX}`;
+      const userPrompt = buildCardiacInvestigationsUserPrompt({ extractedText, patientAge, patientSex, patientDiabetic });
+
+      let raw = "";
+      const resolvedProvider = normalizeAiProvider(provider);
+
+      if (resolvedProvider === "gemini" && hasGeminiKey()) {
+        const parts = [{ text: `${systemPrompt}\n\n${userPrompt}` }];
+        for (const f of imageFiles) {
+          parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+        }
+        const response = await geminiGenerateContent({
+          parts,
+          model: process.env.Gemini_model || getGeminiModel(),
+          temperature: 0,
+          maxOutputTokens: 8192
+        });
+        raw = getTextFromGeminiGenerateContentResponse(response);
+      } else if (resolvedProvider === "claude" && hasAnthropicKey()) {
+        const parts = [{ type: "text", text: userPrompt }];
+        for (const f of imageFiles) {
+          parts.push({
+            type: "image",
+            source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+          });
+        }
+        const response = await anthropicCreateJsonMessage({
+          system: systemPrompt,
+          messages: [{ role: "user", content: parts }],
+          model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+          temperature: 0,
+          maxTokens: 8192
+        });
+        raw = getTextFromAnthropicMessageResponse(response);
+      } else {
+        if (!openai) throw new Error("OpenAI client is not available");
+        const contentParts = [{ type: "text", text: userPrompt }];
+        for (const f of imageFiles) {
+          const dataUrl = `data:${f.mimetype};base64,${f.buffer.toString("base64")}`;
+          contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+        }
+        const completion = await openai.chat.completions.create({
+          model: process.env.OPENAI_MODEL || "gpt-4o",
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: contentParts }
+          ]
+        });
+        raw = completion.choices?.[0]?.message?.content ?? "";
+      }
+
+      const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(raw) ?? {};
+      res.json(parsed);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Failed to extract cardiac investigations" });
+    }
+  }
 );
 
 let _gptControllerContext = null;
