@@ -3524,6 +3524,8 @@ async function generateWomenHealthWithAi({ openai, provider, patient, extractedT
     uterus?.endometrialThicknessMm ?? uterus?.endometrialThickness ?? root?.endometrialThicknessMm
   );
 
+  const genesHealthRaw = root?.genesHealth && typeof root.genesHealth === "object" ? root.genesHealth : {};
+
   const normalized = {
     breast: {
       raceEthnicity: typeof breast?.raceEthnicity === "string" ? breast.raceEthnicity : "",
@@ -3542,11 +3544,18 @@ async function generateWomenHealthWithAi({ openai, provider, patient, extractedT
     ovary: {
       transvaginalUltrasoundSummary:
         typeof ovary?.transvaginalUltrasoundSummary === "string" ? ovary.transvaginalUltrasoundSummary : "",
-      ca125: Number.isFinite(ca125) ? ca125 : null
+      ca125: Number.isFinite(ca125) ? ca125 : null,
+      ca125Summary: typeof ovary?.ca125Summary === "string" ? ovary.ca125Summary : ""
     },
     uterus: {
       endometrialThicknessMm: Number.isFinite(endometrialThicknessMm) ? endometrialThicknessMm : null,
       endometrialBiopsySummary: typeof uterus?.endometrialBiopsySummary === "string" ? uterus.endometrialBiopsySummary : ""
+    },
+    genesHealth: {
+      brcaGenePositive: toBool(genesHealthRaw?.brcaGenePositive),
+      brca1: toBool(genesHealthRaw?.brca1),
+      brca2: toBool(genesHealthRaw?.brca2),
+      genesHealthNotes: typeof genesHealthRaw?.genesHealthNotes === "string" ? genesHealthRaw.genesHealthNotes : ""
     },
     notes: Array.isArray(root?.notes) ? root.notes : []
   };
@@ -3946,6 +3955,7 @@ async function generateCancerScreeningWithAi({ openai, provider, patient, extrac
   const ultra = root?.ultraPremium50plus && typeof root.ultraPremium50plus === "object" ? root.ultraPremium50plus : {};
 
   const normalized = {
+    summary: typeof root?.summary === "string" ? root.summary : "",
     psa: { total, free },
     afp: normalizeMarker(root?.afp),
     ca125: normalizeMarker(root?.ca125),

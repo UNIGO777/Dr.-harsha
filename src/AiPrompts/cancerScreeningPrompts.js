@@ -8,6 +8,7 @@ export const CANCER_SCREENING_SYSTEM_PROMPT = [
 
 export const CANCER_SCREENING_SCHEMA_HINT = `{
   "cancerScreening": {
+    "summary": "",
     "psa": {
       "total": { "done": "", "value": null, "unit": "ng/mL", "date": "", "summary": "" },
       "free": { "done": "", "value": null, "unit": "", "date": "", "summary": "" }
@@ -35,6 +36,7 @@ export function buildCancerScreeningUserPrompt({ patient, extractedText }) {
     CANCER_SCREENING_SCHEMA_HINT,
     "",
     "Rules:",
+    "- summary: a short overall plain-text summary of all cancer screening findings (1-3 sentences, no markdown).",
     "- done must be 'yes' | 'no' | '' (empty string if unknown).",
     "- value must be a number if clearly stated; otherwise null.",
     "- date can be 'YYYY-MM-DD' if clearly stated; otherwise empty string.",

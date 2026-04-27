@@ -22,11 +22,18 @@ export const WOMEN_HEALTH_SCHEMA_HINT = `{
     },
     "ovary": {
       "transvaginalUltrasoundSummary": "",
-      "ca125": null
+      "ca125": null,
+      "ca125Summary": ""
     },
     "uterus": {
       "endometrialThicknessMm": null,
       "endometrialBiopsySummary": ""
+    },
+    "genesHealth": {
+      "brcaGenePositive": null,
+      "brca1": null,
+      "brca2": null,
+      "genesHealthNotes": ""
     },
     "notes": []
   }
@@ -40,9 +47,15 @@ export function buildWomenHealthUserPrompt({ patient, extractedText }) {
 
   return [
     "Extract women health screening findings from the attached report(s)/image(s).",
-    "Focus on: mammogram/sono-mammogram/MRI findings, Pap smear, HPV, transvaginal ultrasound, CA-125, endometrial thickness, endometrial biopsy.",
+    "Focus on: mammogram/sono-mammogram/MRI findings, Pap smear, HPV, transvaginal ultrasound, CA-125 (value + summary), endometrial thickness, endometrial biopsy, BRCA/gene health results.",
     "Return JSON matching this schema:",
     WOMEN_HEALTH_SCHEMA_HINT,
+    "",
+    "Rules:",
+    "- ca125: numeric value only (e.g. 18.5). ca125Summary: short plain-text summary of the CA-125 result.",
+    "- brcaGenePositive: true if BRCA1 or BRCA2 mutation detected, false if tested negative, null if not tested or unknown.",
+    "- brca1 / brca2: true/false/null individually if the report breaks them out.",
+    "- genesHealthNotes: any additional genetics notes from the report.",
     "",
     "Patient context (may help disambiguation; do not hallucinate values):",
     `name: ${name || "unknown"}`,
