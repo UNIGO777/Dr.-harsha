@@ -35,6 +35,7 @@ import { createKidneyHealthHandler } from "../AiControllers/KidneyHealthControll
 import { createDiabetesRiskHandler } from "../AiControllers/DiabetesRiskController.js";
 import { createWomenHealthHandler } from "../AiControllers/WomenHealthController.js";
 import { createBoneHealthHandler } from "../AiControllers/BoneHealthController.js";
+import { createBoneHealthFindingsHandler } from "../AiControllers/BoneHealthFindingsController.js";
 import { createAdultVaccinationHandler } from "../AiControllers/AdultVaccinationController.js";
 import { createCancerScreeningHandler } from "../AiControllers/CancerScreeningController.js";
 import { createGenesHealthHandler } from "../AiControllers/GenesHealthController.js";
@@ -85,7 +86,12 @@ import { EYE_HEALTH_SYSTEM_PROMPT, buildEyeHealthUserPrompt } from "../AiPrompts
 import { KIDNEY_HEALTH_SYSTEM_PROMPT, buildKidneyHealthUserPrompt } from "../AiPrompts/kidneyHealthPrompts.js";
 import { DIABETES_RISK_SYSTEM_PROMPT, buildDiabetesRiskUserPrompt } from "../AiPrompts/diabetesRiskPrompts.js";
 import { WOMEN_HEALTH_SYSTEM_PROMPT, buildWomenHealthUserPrompt } from "../AiPrompts/womenHealthPrompts.js";
-import { BONE_HEALTH_SYSTEM_PROMPT, buildBoneHealthUserPrompt } from "../AiPrompts/boneHealthPrompts.js";
+import {
+  BONE_HEALTH_SYSTEM_PROMPT,
+  buildBoneHealthUserPrompt,
+  BONE_HEALTH_FINDINGS_SYSTEM_PROMPT,
+  buildBoneHealthFindingsUserPrompt
+} from "../AiPrompts/boneHealthPrompts.js";
 import {
   ADULT_VACCINATION_SYSTEM_PROMPT,
   buildAdultVaccinationUserPrompt
@@ -2315,6 +2321,22 @@ function normalizeBoneHealthIncoming(body) {
   return { patient };
 }
 
+function normalizeBoneHealthFindingsIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const bmi = parseOptionalNumberLoose(b.bmi);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null,
+    bmi: Number.isFinite(bmi) && bmi > 0 ? bmi : null
+  };
+  // assessment block is passed as nested JSON object
+  const assessment = b.assessment && typeof b.assessment === "object" ? b.assessment : {};
+  return { patient, assessment };
+}
+
 function normalizeAdultVaccinationIncoming(body) {
   const b = body && typeof body === "object" ? body : {};
   const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
@@ -3698,6 +3720,62 @@ async function generateBoneHealthWithAi({ openai, provider, patient, extractedTe
   };
 
   payload.boneHealth = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateBoneHealthFindingsWithAi({ openai, provider, patient, assessment, debug }) {
+  const userPrompt = buildBoneHealthFindingsUserPrompt({ patient, assessment });
+  const systemPrompt = BONE_HEALTH_FINDINGS_SYSTEM_PROMPT;
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const response = await geminiGenerateContent({
+      parts: [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }],
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0.2,
+      maxOutputTokens: 2048
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: userPrompt }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0.2,
+      maxTokens: 2048
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: userPrompt }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? {};
+  const root = parsed && typeof parsed === "object" ? parsed : {};
+  // AI may wrap fields under a "findings" key — unwrap one level if present
+  const r = root.findings && typeof root.findings === "object" ? root.findings : root;
+
+  const result = {
+    hipLeft:           typeof r.hipLeft === "string"           ? r.hipLeft.trim()           : "",
+    hipRight:          typeof r.hipRight === "string"          ? r.hipRight.trim()          : "",
+    spine:             typeof r.spine === "string"             ? r.spine.trim()             : "",
+    otherJoints:       typeof r.otherJoints === "string"       ? r.otherJoints.trim()       : "",
+    overallImpression: typeof r.overallImpression === "string" ? r.overallImpression.trim() : "",
+    notes:             Array.isArray(r.notes) ? r.notes.filter((n) => typeof n === "string") : []
+  };
+
+  const payload = { findings: result };
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -8013,6 +8091,13 @@ gptRouter.post(
   createBoneHealthHandler(getGptControllerContext)
 );
 
+// Generate clinical findings from structured bone health form data (no file upload)
+gptRouter.post(
+  "/bone-health-findings",
+  express.json({ limit: "1mb" }),
+  createBoneHealthFindingsHandler(getGptControllerContext)
+);
+
 gptRouter.post(
   "/adult-vaccination",
   upload.fields([
@@ -8242,6 +8327,8 @@ function getGptControllerContext() {
     generateWomenHealthWithAi,
     normalizeBoneHealthIncoming,
     generateBoneHealthWithAi,
+    normalizeBoneHealthFindingsIncoming,
+    generateBoneHealthFindingsWithAi,
     normalizeAdultVaccinationIncoming,
     generateAdultVaccinationWithAi,
     normalizeCancerScreeningIncoming,
