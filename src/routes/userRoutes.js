@@ -47,6 +47,7 @@ import {
 } from "../Controllers/patientReportController.js";
 import { searchMedicineNamesController } from "../Controllers/clinicalTablesController.js";
 import { getNurseDashboardController } from "../Controllers/nurseDashboardController.js";
+import { generatePdfController } from "../Controllers/pdfController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { roleMiddleware } from "../middlewares/roleMiddleware.js";
 
@@ -120,6 +121,7 @@ userRouter.delete(
   roleMiddleware(["nurse"]),
   deletePatientReportDocumentController
 );
+userRouter.post("/generate-pdf", authMiddleware, roleMiddleware(["nurse", "doctor"]), generatePdfController);
 userRouter.patch("/:userId", authMiddleware, roleMiddleware(["super_admin"]), updateUserController);
 userRouter.patch("/nurse/crm/:taskId", authMiddleware, roleMiddleware(["nurse"]), updateNurseCrmTaskController);
 userRouter.post("/:userId/generate-email", authMiddleware, roleMiddleware(["super_admin"]), generateUserEmailDraftController);
