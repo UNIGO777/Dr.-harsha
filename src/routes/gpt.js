@@ -41,6 +41,7 @@ import { createCancerScreeningHandler } from "../AiControllers/CancerScreeningCo
 import { createGenesHealthHandler } from "../AiControllers/GenesHealthController.js";
 import { createAllergyPanelsHandler } from "../AiControllers/AllergyPanelsController.js";
 import { createBrainHealthAssessmentHandler } from "../AiControllers/BrainHealthAssessmentController.js";
+import { createElderHealthHandler } from "../AiControllers/ElderHealthController.js";
 
 import { AI_OUTPUT_JSON_SUFFIX } from "../AiPrompts/shared.js";
 import {
@@ -112,6 +113,10 @@ import {
   buildBrainHealthAssessmentUserPrompt,
   buildBrainHealthPart2ExtractUserPrompt
 } from "../AiPrompts/brainHealthAssessmentPrompts.js";
+import {
+  ELDER_HEALTH_SYSTEM_PROMPT,
+  buildElderHealthUserPrompt
+} from "../AiPrompts/elderHealthPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
@@ -2337,6 +2342,18 @@ function normalizeBoneHealthFindingsIncoming(body) {
   return { patient, assessment };
 }
 
+function normalizeElderHealthIncoming(body) {
+  const b = body && typeof body === "object" ? body : {};
+  const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
+  const age = parseOptionalIntegerLoose(b.age);
+  const patient = {
+    name: typeof b.name === "string" ? b.name.trim() : "",
+    sex: sexRaw === "male" || sexRaw === "female" ? sexRaw : "",
+    age: Number.isFinite(age) && age > 0 ? age : null,
+  };
+  return { patient };
+}
+
 function normalizeAdultVaccinationIncoming(body) {
   const b = body && typeof body === "object" ? body : {};
   const sexRaw = typeof b.sex === "string" ? b.sex.trim().toLowerCase() : "";
@@ -3780,6 +3797,170 @@ async function generateBoneHealthFindingsWithAi({ openai, provider, patient, ass
   return payload;
 }
 
+async function generateElderHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildElderHealthUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = ELDER_HEALTH_SYSTEM_PROMPT;
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096,
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") },
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096,
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      contentParts.push({ type: "image_url", image_url: { url: `data:${f.mimetype};base64,${b64}` } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts },
+      ],
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? null;
+  const root = parsed && typeof parsed === "object" ? parsed : {};
+
+  const dexa = root?.dexa && typeof root.dexa === "object" ? root.dexa : {};
+  const frax = root?.frax && typeof root.frax === "object" ? root.frax : {};
+  const falls = root?.falls && typeof root.falls === "object" ? root.falls : {};
+  const berg = root?.berg && typeof root.berg === "object" ? root.berg : {};
+  const frailty = root?.frailty && typeof root.frailty === "object" ? root.frailty : {};
+  const audiogram = root?.audiogram && typeof root.audiogram === "object" ? root.audiogram : {};
+  const cognition = root?.cognition && typeof root.cognition === "object" ? root.cognition : {};
+  const apoE = root?.apoE && typeof root.apoE === "object" ? root.apoE : {};
+  const alzheimerCsf = root?.alzheimerCsf && typeof root.alzheimerCsf === "object" ? root.alzheimerCsf : {};
+  const alzheimerBlood = root?.alzheimerBlood && typeof root.alzheimerBlood === "object" ? root.alzheimerBlood : {};
+
+  const toYesNo = (v) => {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    if (s === "yes" || s === "y" || s === "true" || s === "1") return "yes";
+    if (s === "no" || s === "n" || s === "false" || s === "0") return "no";
+    return "";
+  };
+
+  const toHearingLevel = (v) => {
+    const s = typeof v === "string" ? v.trim() : "";
+    const lower = s.toLowerCase();
+    if (lower.includes("normal")) return "Normal";
+    if (lower.includes("mild")) return "Mild";
+    if (lower.includes("moderate")) return "Moderate";
+    if (lower.includes("severe")) return "Severe";
+    return "";
+  };
+
+  const toRiskCategory = (v) => {
+    const s = typeof v === "string" ? v.trim() : "";
+    const lower = s.toLowerCase();
+    if (lower === "low") return "Low";
+    if (lower === "moderate" || lower === "medium") return "Moderate";
+    if (lower === "high") return "High";
+    return "";
+  };
+
+  const femoralNeckBmdGcm2 = parseOptionalNumberLoose(dexa?.femoralNeckBmdGcm2);
+  const femoralNeckTScore = parseOptionalNumberLoose(dexa?.femoralNeckTScore);
+  const totalHipTScore = parseOptionalNumberLoose(dexa?.totalHipTScore);
+  const lumbarSpineTScore = parseOptionalNumberLoose(dexa?.lumbarSpineTScore);
+  const majorOsteoporotic10yPct = parseOptionalNumberLoose(frax?.majorOsteoporotic10yPct);
+  const hip10yPct = parseOptionalNumberLoose(frax?.hip10yPct);
+  const fallsCountPastYear = parseOptionalIntegerLoose(falls?.fallsCountPastYear);
+  const bergBalanceScore = parseOptionalNumberLoose(berg?.bergBalanceScore ?? berg?.score);
+  const clinicalFrailtyScore = parseOptionalNumberLoose(frailty?.clinicalFrailtyScore ?? frailty?.cfs);
+  const miniCogScore = parseOptionalNumberLoose(cognition?.miniCogScore ?? cognition?.miniCog);
+  const mocaScore = parseOptionalNumberLoose(cognition?.mocaScore ?? cognition?.moca);
+
+  const payload = {
+    dexa: {
+      femoralNeckBmdGcm2: Number.isFinite(femoralNeckBmdGcm2) ? femoralNeckBmdGcm2 : null,
+      femoralNeckTScore: Number.isFinite(femoralNeckTScore) ? femoralNeckTScore : null,
+      totalHipTScore: Number.isFinite(totalHipTScore) ? totalHipTScore : null,
+      lumbarSpineTScore: Number.isFinite(lumbarSpineTScore) ? lumbarSpineTScore : null,
+      impression: typeof dexa?.impression === "string" ? dexa.impression : "",
+    },
+    frax: {
+      majorOsteoporotic10yPct: Number.isFinite(majorOsteoporotic10yPct) ? majorOsteoporotic10yPct : null,
+      hip10yPct: Number.isFinite(hip10yPct) ? hip10yPct : null,
+      country: typeof frax?.country === "string" ? frax.country : "",
+      priorFragilityFracture: toYesNo(frax?.priorFragilityFracture),
+      parentalHipFracture: toYesNo(frax?.parentalHipFracture),
+      glucocorticoids: toYesNo(frax?.glucocorticoids),
+      rheumatoidArthritis: toYesNo(frax?.rheumatoidArthritis),
+      secondaryOsteoporosis: toYesNo(frax?.secondaryOsteoporosis),
+    },
+    falls: {
+      fallsInPastYear: toYesNo(falls?.fallsInPastYear),
+      fallsCountPastYear: Number.isFinite(fallsCountPastYear) ? fallsCountPastYear : null,
+      fallRiskCategory: toRiskCategory(falls?.fallRiskCategory),
+      fallRiskSummary: typeof falls?.fallRiskSummary === "string" ? falls.fallRiskSummary : "",
+    },
+    berg: {
+      bergBalanceScore: Number.isFinite(bergBalanceScore) ? bergBalanceScore : null,
+      bergSummary: typeof berg?.bergSummary === "string" ? berg.bergSummary : "",
+    },
+    frailty: {
+      clinicalFrailtyScore: Number.isFinite(clinicalFrailtyScore) && clinicalFrailtyScore >= 1 && clinicalFrailtyScore <= 9
+        ? clinicalFrailtyScore
+        : null,
+    },
+    audiogram: {
+      hearingLevel: toHearingLevel(audiogram?.hearingLevel),
+      summary: typeof audiogram?.summary === "string" ? audiogram.summary : "",
+    },
+    cognition: {
+      miniCogScore: Number.isFinite(miniCogScore) && miniCogScore >= 0 && miniCogScore <= 5 ? miniCogScore : null,
+      mocaScore: Number.isFinite(mocaScore) && mocaScore >= 0 && mocaScore <= 30 ? mocaScore : null,
+    },
+    apoE: {
+      result: typeof apoE?.result === "string" ? apoE.result : "",
+    },
+    alzheimerCsf: {
+      result: typeof alzheimerCsf?.result === "string" ? alzheimerCsf.result : "",
+    },
+    alzheimerBlood: {
+      result: typeof alzheimerBlood?.result === "string" ? alzheimerBlood.result : "",
+    },
+    overallImpression: typeof root?.overallImpression === "string" ? root.overallImpression : "",
+    notes: Array.isArray(root?.notes) ? root.notes : [],
+  };
+
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
 async function generateAdultVaccinationWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
   const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
   const userPrompt = buildAdultVaccinationUserPrompt({ patient, extractedText: textForPrompt });
@@ -4079,6 +4260,102 @@ async function generateCancerScreeningWithAi({ openai, provider, patient, extrac
   };
 
   payload.cancerScreening = normalized;
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generateCancerScreeningSummarizeWithAi({ openai, provider, patient, assessment, debug }) {
+  const p = patient && typeof patient === "object" ? patient : {};
+  const a = assessment && typeof assessment === "object" ? assessment : {};
+
+  const buildLine = (label, val) => (val != null && val !== "" ? `${label}: ${val}` : null);
+
+  const lines = [
+    "Patient details:",
+    buildLine("  Name", p.name),
+    buildLine("  Sex", p.sex),
+    buildLine("  Age", p.age),
+    "",
+    "Cancer screening results (values already entered by the doctor):",
+    a.psaTotalDone === "yes" ? buildLine("  Total PSA (ng/mL)", a.psaTotalValue) : null,
+    a.psaFreeDone === "yes"  ? buildLine("  Free PSA",          a.psaFreeValue)  : null,
+    a.afpDone    === "yes"   ? buildLine("  AFP",               a.afpValue)      : null,
+    a.ca125Done  === "yes"   ? buildLine("  CA-125",            a.ca125Value)    : null,
+    a.ceaDone    === "yes"   ? buildLine("  CEA",               a.ceaValue)      : null,
+    a.bloodCancerPanelDone === "yes" ? "  Blood Cancer Panel: done" : null,
+    a.stoolOccultDone === "yes"      ? buildLine("  Stool Occult Blood test result", a.stoolOccultResult) : null,
+    a.hrctDone === "yes"             ? "  Low-Dose HRCT Chest: done" : null,
+    a.ultraPremiumDone === "yes"     ? "  Ultra-Premium All-in-1 Blood Test (50+ cancers): done" : null,
+    buildLine("  Overall summary text already entered", a.overallSummary),
+  ].filter(Boolean).join("\n");
+
+  const systemPrompt = "You are a medical report writer. Write concise, professional, plain-text clinical summaries for each of the cancer screening tests listed. No markdown. No bullet points. Sentences only. Return JSON only.";
+
+  const schema = `{
+  "overallSummary": "",
+  "psaTotalSummary": "",
+  "psaFreeSummary": "",
+  "afpSummary": "",
+  "ca125Summary": "",
+  "ceaSummary": "",
+  "bloodCancerPanelSummary": "",
+  "stoolOccultBloodTestSummary": "",
+  "hrctSummary": "",
+  "ultraPremiumSummary": ""
+}`;
+
+  const userPrompt = `Based on the cancer screening results below, write a clinical summary for each test that was done. Only write summaries for tests that have been done (not empty/missing). Return JSON matching this schema:\n${schema}\n\n${lines}`;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const response = await geminiGenerateContent({
+      parts: [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }],
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0.3,
+      maxOutputTokens: 2048
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: userPrompt }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0.3,
+      maxTokens: 2048
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0.3,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: userPrompt }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ?? {};
+  const r = parsed && typeof parsed === "object" ? parsed : {};
+  const str = (v) => (typeof v === "string" ? v.trim() : "");
+  const result = {
+    overallSummary:             str(r.overallSummary),
+    psaTotalSummary:            str(r.psaTotalSummary),
+    psaFreeSummary:             str(r.psaFreeSummary),
+    afpSummary:                 str(r.afpSummary),
+    ca125Summary:               str(r.ca125Summary),
+    ceaSummary:                 str(r.ceaSummary),
+    bloodCancerPanelSummary:    str(r.bloodCancerPanelSummary),
+    stoolOccultBloodTestSummary:str(r.stoolOccultBloodTestSummary),
+    hrctSummary:                str(r.hrctSummary),
+    ultraPremiumSummary:        str(r.ultraPremiumSummary),
+  };
+  const payload = { summaries: result };
   if (debug) payload.raw = raw;
   return payload;
 }
@@ -8116,6 +8393,27 @@ gptRouter.post(
   createCancerScreeningHandler(getGptControllerContext)
 );
 
+// Generate summaries from existing cancer screening values (no file upload)
+gptRouter.post("/cancer-screening-summarize", express.json({ limit: "1mb" }), async (req, res) => {
+  try {
+    const provider = getAiProviderFromReq(req);
+    const openai = provider === "openai" ? getOpenAIClient() : null;
+    if (provider === "openai" && !openai) return res.status(500).json({ error: "OPENAI_API_KEY is not set" });
+    if (provider === "gemini" && !hasGeminiKey()) return res.status(500).json({ error: "Gemini_api_key is not set" });
+
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const assessment = body.assessment && typeof body.assessment === "object" ? body.assessment : {};
+    const debugAi = process.env.AI_DEBUG === "1";
+
+    const result = await generateCancerScreeningSummarizeWithAi({ openai, provider, patient, assessment, debug: debugAi });
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: message });
+  }
+});
+
 gptRouter.post(
   "/genes-health",
   upload.fields([
@@ -8141,6 +8439,15 @@ gptRouter.post(
     { name: "file", maxCount: 1 }
   ]),
   createBrainHealthAssessmentHandler(getGptControllerContext)
+);
+
+gptRouter.post(
+  "/elder-health-extract",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createElderHealthHandler(getGptControllerContext)
 );
 
 gptRouter.post(
@@ -8339,6 +8646,8 @@ function getGptControllerContext() {
     generateAllergyPanelsWithAi,
     normalizeBrainHealthAssessmentIncoming,
     generateBrainHealthAssessmentWithAi,
+    normalizeElderHealthIncoming,
+    generateElderHealthWithAi,
     getTextFromMessageContent,
     getTextFromResponsesOutput,
     isImageMime,
