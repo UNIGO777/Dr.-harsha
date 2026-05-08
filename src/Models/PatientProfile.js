@@ -78,6 +78,13 @@ const patientProfileSchema = new mongoose.Schema(
 );
 
 patientProfileSchema.index({ assignedDoctors: 1, assignedNurses: 1 });
+// Indexes for nurse panel queries (single-field lookups done without the composite index)
+patientProfileSchema.index({ assignedNurses: 1 });
+patientProfileSchema.index({ assignedDoctors: 1 });
+patientProfileSchema.index({ assignedNurses: 1, lastInteractionAt: -1 });
+// Indexes for date-based dashboard queries
+patientProfileSchema.index({ followUpDueAt: 1 });
+patientProfileSchema.index({ nextAppointmentAt: 1 });
 
 export const PatientProfile =
   mongoose.models.PatientProfile || mongoose.model("PatientProfile", patientProfileSchema);

@@ -1011,7 +1011,7 @@ export async function listNursePatientManagementController(req, res) {
       assignedDoctors: managedDoctor._id,
       assignedNurses: nurseId
     })
-      .populate("user", "name email role phone status userNumber createdAt updatedAt lastLoginAt")
+      .populate("user", "name email role phone gender status userNumber createdAt updatedAt lastLoginAt")
       .populate("assignedDoctors", "name email phone status userNumber")
       .populate("assignedNurses", "name email phone status userNumber")
       .sort({ updatedAt: -1 })
@@ -1060,9 +1060,20 @@ export async function getNursePatientProfileController(req, res) {
       patientId
     });
 
-    const patientProfileDocument = await PatientProfile.findOne(patientProfileQuery);
+    // Single query with populate — avoids the double round-trip
+    const patientProfileDocument = await PatientProfile.findOne(patientProfileQuery)
+      .populate("user", "name email role phone gender status userNumber createdAt updatedAt lastLoginAt")
+      .populate("assignedDoctors", "name email phone status userNumber")
+      .populate("assignedNurses", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .populate("medications.doctor", "name email phone status userNumber")
+      .populate("medications.addedBy", "name email phone status userNumber");
 
     if (!patientProfileDocument?._id) {
+      return res.status(404).json({ error: "Patient not found in your assignment" });
+    }
+
+    if (!patientProfileDocument?.user?._id) {
       return res.status(404).json({ error: "Patient not found in your assignment" });
     }
 
@@ -1070,18 +1081,7 @@ export async function getNursePatientProfileController(req, res) {
       await patientProfileDocument.save();
     }
 
-    const patientProfile = await PatientProfile.findById(patientProfileDocument._id)
-      .populate("user", "name email role phone status userNumber createdAt updatedAt lastLoginAt")
-      .populate("assignedDoctors", "name email phone status userNumber")
-      .populate("assignedNurses", "name email phone status userNumber")
-      .populate("notes.createdBy", "name email phone status userNumber")
-      .populate("medications.doctor", "name email phone status userNumber")
-      .populate("medications.addedBy", "name email phone status userNumber")
-      .lean();
-
-    if (!patientProfile?.user?._id) {
-      return res.status(404).json({ error: "Patient not found in your assignment" });
-    }
+    const patientProfile = patientProfileDocument.toObject();
 
     const now = new Date();
     const [futureFollowUps, followUpHistory, upcomingAppointments, appointmentHistory] = await Promise.all([
@@ -1144,12 +1144,18 @@ export async function getNursePatientProfileController(req, res) {
         .lean()
     ]);
 
+    // Limit notes to the 50 most recent to avoid sending unbounded arrays.
+    // Medications are typically small but still sorted newest-first.
+    const recentNotes = Array.isArray(patientProfile.notes)
+      ? [...patientProfile.notes]
+          .sort((a, b) => new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime())
+          .slice(0, 50)
+      : [];
+
     return res.json({
       patient: {
         ...buildPatientManagementResponse({ profile: patientProfile, managedDoctor }),
-        notes: Array.isArray(patientProfile.notes)
-          ? patientProfile.notes.map((note) => buildPatientProfileNoteResponse(note)).filter(Boolean)
-          : [],
+        notes: recentNotes.map((note) => buildPatientProfileNoteResponse(note)).filter(Boolean),
         medications: Array.isArray(patientProfile.medications)
           ? [...patientProfile.medications]
               .sort((left, right) => new Date(right?.createdAt || 0).getTime() - new Date(left?.createdAt || 0).getTime())

@@ -119,9 +119,57 @@ import {
   ELDER_HEALTH_SYSTEM_PROMPT,
   buildElderHealthUserPrompt
 } from "../AiPrompts/elderHealthPrompts.js";
+import {
+  STEP1_SYSTEM_PROMPT, buildStep1UserPrompt,
+  STEP2_SYSTEM_PROMPT, buildStep2UserPrompt,
+  STEP3_SYSTEM_PROMPT, buildStep3UserPrompt,
+  STEP4_SYSTEM_PROMPT, buildStep4UserPrompt,
+  STEP5_SYSTEM_PROMPT, buildStep5UserPrompt,
+} from "../AiPrompts/holisticPlanPrompts.js";
 
 function requireString(value) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+/**
+ * Returns true for OpenAI models that use max_completion_tokens instead of
+ * max_tokens, and do not support temperature or response_format.
+ * Covers: o1, o1-mini, o1-preview, o3, o3-mini, o4, o4-mini, gpt-5* series.
+ */
+function isOpenAiReasoningModel(model) {
+  const m = typeof model === "string" ? model.trim().toLowerCase() : "";
+  return (
+    /^o\d/.test(m) ||          // o1, o3, o4, o1-mini, o4-mini …
+    m.startsWith("gpt-5")      // gpt-5, gpt-5.2, gpt-5-turbo …
+  );
+}
+
+/**
+ * Builds the params object for openai.chat.completions.create() in a way that
+ * works for both legacy GPT-4 models and new reasoning / GPT-5 models.
+ */
+function buildOpenAiChatParams({ model, systemPrompt, userPrompt, maxTokens = 4096, temperature = 0.3, jsonMode = false }) {
+  const resolvedModel = requireString(model) ? model : (process.env.OPENAI_MODEL || "gpt-4o");
+  const isReasoning = isOpenAiReasoningModel(resolvedModel);
+
+  const params = {
+    model: resolvedModel,
+    messages: [
+      ...(requireString(systemPrompt) ? [{ role: "system", content: systemPrompt }] : []),
+      { role: "user", content: userPrompt }
+    ]
+  };
+
+  if (isReasoning) {
+    // Reasoning models: use max_completion_tokens; skip temperature & response_format
+    params.max_completion_tokens = Math.max(256, Math.trunc(maxTokens));
+  } else {
+    params.temperature = Number.isFinite(temperature) ? temperature : 0.3;
+    params.max_tokens = Math.max(256, Math.trunc(maxTokens));
+    if (jsonMode) params.response_format = { type: "json_object" };
+  }
+
+  return params;
 }
 
 function getOpenAIClient() {
@@ -8668,6 +8716,173 @@ gptRouter.post(
     }
   }
 );
+
+// ─── Holistic Plan — shared AI call helper ────────────────────────────────────
+async function runHolisticPlanAi({ provider, openai, systemPrompt, userPrompt, maxTokens = 4096 }) {
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini" && hasGeminiKey()) {
+    const response = await geminiGenerateContent({
+      parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }],
+      model: process.env.Gemini_model || "gemini-2.5-flash",
+      temperature: 0.3,
+      maxOutputTokens: maxTokens
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude" && hasAnthropicKey()) {
+    const response = await anthropicCreateJsonMessage({
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0.3,
+      maxTokens
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const completion = await openai.chat.completions.create(
+      buildOpenAiChatParams({ model: process.env.OPENAI_MODEL || "gpt-4o", systemPrompt, userPrompt, maxTokens, temperature: 0.3, jsonMode: true })
+    );
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  // Strip markdown code fences that some models add even when told not to
+  raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+
+  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "");
+  if (!parsed) throw new Error("AI did not return valid JSON");
+  return parsed;
+}
+
+// ─── Holistic Prevention & Lifestyle Plan — 5-step endpoints ─────────────────
+// Each step is a separate small request so no single call is too large.
+//
+//  POST /api/holistic-plan/step1  — Risk Assessment + Foundation
+//  POST /api/holistic-plan/step2  — Short-Term Plan (0-3 months)
+//  POST /api/holistic-plan/step3  — Medium & Long-Term Plans
+//  POST /api/holistic-plan/step4  — Treatment + Tests + Review
+//  POST /api/holistic-plan/step5  — Lifestyle + Referrals + Handouts + Table
+//
+// All accept JSON body. Steps 2-5 only need { provider, patient, riskTags, sections }.
+// Step 1 additionally needs { reportValues, personalization }.
+
+const holisticJson = express.json({ limit: "4mb" });
+
+function getHolisticClients(req) {
+  const provider = getAiProviderFromReq(req);
+  const openai = provider === "openai" ? getOpenAIClient() : null;
+  if (provider === "openai" && !openai) throw Object.assign(new Error("OPENAI_API_KEY is not set"), { status: 500 });
+  if (provider === "gemini" && !hasGeminiKey()) throw Object.assign(new Error("Gemini_api_key is not set"), { status: 500 });
+  return { provider, openai };
+}
+
+// Step 1 — Risk Assessment + Foundation
+gptRouter.post("/holistic-plan/step1", holisticJson, async (req, res) => {
+  try {
+    const { provider, openai } = getHolisticClients(req);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const sections = body.sections && typeof body.sections === "object" ? body.sections : {};
+    const reportValues = body.reportValues && typeof body.reportValues === "object" ? body.reportValues : {};
+    const personalization = body.personalization && typeof body.personalization === "object" ? body.personalization : {};
+
+    const result = await runHolisticPlanAi({
+      provider, openai,
+      systemPrompt: STEP1_SYSTEM_PROMPT,
+      userPrompt: buildStep1UserPrompt({ patient, sections, reportValues, personalization }),
+      maxTokens: 4096
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Step 1 failed" });
+  }
+});
+
+// Step 2 — Short-Term Plan
+gptRouter.post("/holistic-plan/step2", holisticJson, async (req, res) => {
+  try {
+    const { provider, openai } = getHolisticClients(req);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const sections = body.sections && typeof body.sections === "object" ? body.sections : {};
+    const riskTags = body.riskTags && typeof body.riskTags === "object" ? body.riskTags : {};
+
+    const result = await runHolisticPlanAi({
+      provider, openai,
+      systemPrompt: STEP2_SYSTEM_PROMPT,
+      userPrompt: buildStep2UserPrompt({ patient, riskTags, sections }),
+      maxTokens: 4096
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Step 2 failed" });
+  }
+});
+
+// Step 3 — Medium & Long-Term Plans
+gptRouter.post("/holistic-plan/step3", holisticJson, async (req, res) => {
+  try {
+    const { provider, openai } = getHolisticClients(req);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const sections = body.sections && typeof body.sections === "object" ? body.sections : {};
+    const riskTags = body.riskTags && typeof body.riskTags === "object" ? body.riskTags : {};
+
+    const result = await runHolisticPlanAi({
+      provider, openai,
+      systemPrompt: STEP3_SYSTEM_PROMPT,
+      userPrompt: buildStep3UserPrompt({ patient, riskTags, sections }),
+      maxTokens: 4096
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Step 3 failed" });
+  }
+});
+
+// Step 4 — Treatment + Tests + Review
+gptRouter.post("/holistic-plan/step4", holisticJson, async (req, res) => {
+  try {
+    const { provider, openai } = getHolisticClients(req);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const sections = body.sections && typeof body.sections === "object" ? body.sections : {};
+    const riskTags = body.riskTags && typeof body.riskTags === "object" ? body.riskTags : {};
+
+    const result = await runHolisticPlanAi({
+      provider, openai,
+      systemPrompt: STEP4_SYSTEM_PROMPT,
+      userPrompt: buildStep4UserPrompt({ patient, riskTags, sections }),
+      maxTokens: 4096
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Step 4 failed" });
+  }
+});
+
+// Step 5 — Lifestyle + Referrals + Handouts + Table
+gptRouter.post("/holistic-plan/step5", holisticJson, async (req, res) => {
+  try {
+    const { provider, openai } = getHolisticClients(req);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const sections = body.sections && typeof body.sections === "object" ? body.sections : {};
+    const riskTags = body.riskTags && typeof body.riskTags === "object" ? body.riskTags : {};
+    const shortTermGoals = body.shortTermGoals && typeof body.shortTermGoals === "object" ? body.shortTermGoals : null;
+
+    const result = await runHolisticPlanAi({
+      provider, openai,
+      systemPrompt: STEP5_SYSTEM_PROMPT,
+      userPrompt: buildStep5UserPrompt({ patient, riskTags, shortTermGoals, sections }),
+      maxTokens: 6144
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Step 5 failed" });
+  }
+});
 
 let _gptControllerContext = null;
 

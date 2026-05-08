@@ -61,5 +61,7 @@ const crmTaskSchema = new mongoose.Schema(
 crmTaskSchema.index({ patient: 1, status: 1, followUpAt: 1 });
 crmTaskSchema.index({ patient: 1, assignedDoctor: 1, status: 1 });
 crmTaskSchema.index({ assignedNurse: 1, status: 1, dueAt: 1 });
+// Covers the nurse patient profile query: patient + doctor + status + date filter
+crmTaskSchema.index({ patient: 1, assignedDoctor: 1, status: 1, followUpAt: 1 });
 
 export const CrmTask = mongoose.models.CrmTask || mongoose.model("CrmTask", crmTaskSchema);
