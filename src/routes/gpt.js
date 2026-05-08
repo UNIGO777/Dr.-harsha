@@ -27,6 +27,7 @@ import { createUltrasoundAnalysisHandler } from "../AiControllers/UltrasoundCont
 import { createExerciseAssessmentHandler } from "../AiControllers/ExerciseAssessmentController.js";
 import { createDietAssessmentHandler } from "../AiControllers/DietAssessmentController.js";
 import { createAnsAssessmentHandler } from "../AiControllers/AnsAssessmentController.js";
+import { createPnsAssessmentHandler } from "../AiControllers/PnsAssessmentController.js";
 import { createArterialHealthHandler } from "../AiControllers/ArterialHealthController.js";
 import { createLungFunctionHandler } from "../AiControllers/LungFunctionController.js";
 import { createLiverHealthHandler } from "../AiControllers/LiverHealthController.js";
@@ -77,6 +78,7 @@ import {
 } from "../AiPrompts/exerciseAssessmentPrompts.js";
 import { DIET_ASSESSMENT_SYSTEM_PROMPT, buildDietAssessmentUserPrompt } from "../AiPrompts/dietAssessmentPrompts.js";
 import { ANS_ASSESSMENT_SYSTEM_PROMPT, buildAnsAssessmentUserPrompt } from "../AiPrompts/ansAssessmentPrompts.js";
+import { PNS_ASSESSMENT_SYSTEM_PROMPT, buildPnsAssessmentUserPrompt } from "../AiPrompts/pnsAssessmentPrompts.js";
 import {
   ARTERIAL_HEALTH_SYSTEM_PROMPT,
   buildArterialHealthUserPrompt
@@ -2521,6 +2523,72 @@ async function generateAnsAssessmentWithAi({
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0,
       maxTokens: 8192
+    });
+    raw = getTextFromAnthropicMessageResponse(response);
+  } else {
+    if (!openai) throw new Error("OpenAI client is not available");
+    const contentParts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      const b64 = f.buffer.toString("base64");
+      const dataUrl = `data:${f.mimetype};base64,${b64}`;
+      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
+    }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}` },
+        { role: "user", content: contentParts }
+      ]
+    });
+    raw = completion.choices?.[0]?.message?.content ?? "";
+  }
+
+  const parsed =
+    safeParseJsonObject(raw) ??
+    safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ??
+    null;
+
+  const payload = parsed && typeof parsed === "object" ? parsed : {};
+  if (debug) payload.raw = raw;
+  return payload;
+}
+
+async function generatePnsAssessmentWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+  const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 20000) : "";
+  const userPrompt = buildPnsAssessmentUserPrompt({ patient, extractedText: textForPrompt });
+  const systemPrompt = PNS_ASSESSMENT_SYSTEM_PROMPT;
+
+  const resolvedProvider = normalizeAiProvider(provider);
+  let raw = "";
+
+  if (resolvedProvider === "gemini") {
+    const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
+    }
+    const response = await geminiGenerateContent({
+      parts,
+      model: process.env.Gemini_model || getGeminiModel(),
+      temperature: 0,
+      maxOutputTokens: 4096
+    });
+    raw = getTextFromGeminiGenerateContentResponse(response);
+  } else if (resolvedProvider === "claude") {
+    const parts = [{ type: "text", text: userPrompt }];
+    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
+      parts.push({
+        type: "image",
+        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
+      });
+    }
+    const response = await anthropicCreateJsonMessage({
+      system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
+      messages: [{ role: "user", content: parts }],
+      model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
+      temperature: 0,
+      maxTokens: 4096
     });
     raw = getTextFromAnthropicMessageResponse(response);
   } else {
@@ -8198,6 +8266,15 @@ gptRouter.post(
 );
 
 gptRouter.post(
+  "/pns-assessment",
+  upload.fields([
+    { name: "files", maxCount: MAX_ANALYSIS_FILES },
+    { name: "file", maxCount: 1 }
+  ]),
+  createPnsAssessmentHandler(getGptControllerContext)
+);
+
+gptRouter.post(
   "/arterial-health",
   upload.fields([
     { name: "files", maxCount: MAX_ANALYSIS_FILES },
@@ -8618,6 +8695,7 @@ function getGptControllerContext() {
     normalizeAnsAssessmentIncoming,
     computeOrthostaticVitals,
     generateAnsAssessmentWithAi,
+    generatePnsAssessmentWithAi,
     normalizeArterialHealthIncoming,
     generateArterialHealthWithAi,
     normalizeLungFunctionIncoming,
