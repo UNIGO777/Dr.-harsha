@@ -37,6 +37,7 @@ const patientReportSchema = new mongoose.Schema(
     advancedBodyComposition: { type: mongoose.Schema.Types.Mixed, default: null },
     docsTestsAnalysis: { type: mongoose.Schema.Types.Mixed, default: null },
     ultrasoundAnalysis: { type: mongoose.Schema.Types.Mixed, default: null },
+    holisticPlan: { type: mongoose.Schema.Types.Mixed, default: null },
     structuredSections: {
       patient: reportSectionField,
       pastMedicalHistory: reportSectionField,
