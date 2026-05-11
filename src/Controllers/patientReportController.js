@@ -248,6 +248,7 @@ function buildPatientReportResponse(report) {
     advancedBodyComposition: report.advancedBodyComposition ?? null,
     docsTestsAnalysis: report.docsTestsAnalysis ?? null,
     ultrasoundAnalysis: report.ultrasoundAnalysis ?? null,
+    holisticPlan: report.holisticPlan ?? null,
     structuredSections: normalizeStructuredSections(report.structuredSections),
     uploadedDocuments,
     uploadedDocumentCount: uploadedDocuments.length,
@@ -412,8 +413,19 @@ export async function savePatientReportController(req, res) {
     report.advancedBodyComposition = req?.body?.advancedBodyComposition ?? report.advancedBodyComposition ?? null;
     report.docsTestsAnalysis = req?.body?.docsTestsAnalysis ?? report.docsTestsAnalysis ?? null;
     report.ultrasoundAnalysis = req?.body?.ultrasoundAnalysis ?? report.ultrasoundAnalysis ?? null;
+    report.holisticPlan = req?.body?.holisticPlan ?? report.holisticPlan ?? null;
+
+    // Mongoose Mixed fields won't be detected as changed unless explicitly marked
+    report.markModified("reportValues");
+    report.markModified("generatedReport");
+    report.markModified("advancedBodyComposition");
+    report.markModified("docsTestsAnalysis");
+    report.markModified("ultrasoundAnalysis");
+    report.markModified("holisticPlan");
+
     if (structuredSections) {
       report.structuredSections = structuredSections;
+      report.markModified("structuredSections");
     }
     report.activeStepId = stepId || report.activeStepId || "";
     report.lastSavedStepId = stepId || report.lastSavedStepId || "";

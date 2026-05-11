@@ -547,3 +547,40 @@ ${keyData}
 Return ONLY this JSON schema:
 ${STEP5_SCHEMA}`;
 }
+
+// ─── REGENERATE: Modify existing plan based on change request ────────────────
+
+export const REGENERATE_SYSTEM_PROMPT = `You are a Preventive Medicine and Metabolic Health expert.
+You will receive an existing holistic prevention & lifestyle plan that was previously generated for a patient, along with the patient's clinical data and a specific change request from the treating team.
+Your task is to return a fully updated version of the plan that incorporates the requested changes while keeping everything else consistent.
+${BASE_RULES}`;
+
+export function buildRegenerateUserPrompt({ patient, sections, existingPlan, changeRequest }) {
+  const header = buildPatientHeader(patient || {});
+  const clinicalData = buildClinicalData(sections || {}, {});
+  const planJson = JSON.stringify(existingPlan || {});
+  const request = safeStr(changeRequest) || "Improve and refine the plan.";
+
+  return `The treating team wants to update this patient's Holistic Prevention & Lifestyle Plan.
+
+## PATIENT
+${header}
+
+## CLINICAL DATA
+${clinicalData}
+
+## EXISTING PLAN (currently saved)
+${planJson}
+
+## CHANGE REQUEST FROM TREATING TEAM
+"${request}"
+
+Instructions:
+- Apply the change request to the relevant sections of the plan.
+- Keep all other sections unchanged unless the change request directly affects them.
+- Preserve the exact same JSON keys and structure as the existing plan above.
+- Do NOT drop any top-level keys that exist in the existing plan.
+- Return the complete updated plan as a single JSON object (same structure as the existing plan).
+
+Return ONLY the updated JSON. No markdown, no explanation, no text outside the JSON.`;
+}

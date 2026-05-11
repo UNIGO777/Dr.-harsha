@@ -125,6 +125,7 @@ import {
   STEP3_SYSTEM_PROMPT, buildStep3UserPrompt,
   STEP4_SYSTEM_PROMPT, buildStep4UserPrompt,
   STEP5_SYSTEM_PROMPT, buildStep5UserPrompt,
+  REGENERATE_SYSTEM_PROMPT, buildRegenerateUserPrompt,
 } from "../AiPrompts/holisticPlanPrompts.js";
 
 function requireString(value) {
@@ -8881,6 +8882,32 @@ gptRouter.post("/holistic-plan/step5", holisticJson, async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Step 5 failed" });
+  }
+});
+
+// Regenerate — update existing plan based on change request
+gptRouter.post("/holistic-plan/regenerate", holisticJson, async (req, res) => {
+  try {
+    const { provider, openai } = getHolisticClients(req);
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const patient = body.patient && typeof body.patient === "object" ? body.patient : {};
+    const sections = body.sections && typeof body.sections === "object" ? body.sections : {};
+    const existingPlan = body.existingPlan && typeof body.existingPlan === "object" ? body.existingPlan : {};
+    const changeRequest = typeof body.changeRequest === "string" ? body.changeRequest.trim() : "";
+
+    if (!changeRequest) {
+      return res.status(400).json({ error: "changeRequest is required" });
+    }
+
+    const result = await runHolisticPlanAi({
+      provider, openai,
+      systemPrompt: REGENERATE_SYSTEM_PROMPT,
+      userPrompt: buildRegenerateUserPrompt({ patient, sections, existingPlan, changeRequest }),
+      maxTokens: 8192
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err instanceof Error ? err.message : "Regenerate failed" });
   }
 });
 
