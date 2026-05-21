@@ -11,7 +11,26 @@ const BASE_RULES = `RULES:
 - Return ONLY valid JSON. No markdown, no code fences, no text outside the JSON.
 - For medications: NEVER prescribe directly — use "Consider discussion regarding…" or "May benefit from…".
 - Quantify every goal where possible (e.g. lose 3-4 kg, walk 8000 steps/day, sleep 7-8 hrs).
-- Keep tone professional but understandable. Do not overpromise.`;
+- Keep tone professional but understandable. Do not overpromise.
+- Focus on ROOT CAUSE correction and HIGH IMPACT interventions.
+- Mention reversible vs non-reversible risks clearly.
+- Mention disease progression risks if ignored AND expected benefits if compliant.
+- Clearly separate: lifestyle interventions, medications, supplements, investigations, referrals, procedures/surgeries.
+- Mention when specialist consultation is required urgently.
+- Mention red flag findings separately.
+- Give quantified goals wherever possible.`;
+
+// ─── Dr. Harsha programme recommendation rules ─────────────────────────────
+const PROGRAMME_RULES = `DR. HARSHA PROGRAMME RECOMMENDATIONS (include in relevant plan sections):
+- If Diabetic → recommend "Dr. Harsha's Diet for Diabetes programme"
+- If Pre-diabetic → recommend "Dr. Harsha's Pre-Diabetes Diet programme"
+- If Hypertensive → recommend "Dr. Harsha's Diet for High BP programme"
+- If overweight/obese → recommend "Dr. Harsha's Weight Loss Diet programme"
+- If Dyslipidaemia → recommend "Dr. Harsha's Diet for High Cholesterol programme"
+- If Heart Attack history → recommend "Dr. Harsha's Diet for Heart Attack programme"
+- If Stroke history → recommend "Dr. Harsha's Diet for Stroke programme"
+- For exercise section always mention: "Follow Dr. Harsha's Exercise Health App (to be launched soon)"
+- Do NOT include dietician as a cross-specialty referral.`;
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
@@ -94,7 +113,7 @@ function buildClinicalData(sections, reportValues) {
 
 // ─── STEP 1: Risk Assessment + Foundation ────────────────────────────────────
 
-export const STEP1_SYSTEM_PROMPT = `You are a Preventive Medicine and Metabolic Health expert.
+export const STEP1_SYSTEM_PROMPT = `You are an advanced Lifestyle, Prevention, and Metabolic Health Consultant combining expertise in lifestyle medicine, preventive cardiology, obesity medicine, nutrition science, sleep medicine, exercise medicine, functional health, risk reduction strategy, conventional medical management, and elective preventive interventions.
 Analyze the patient's complete health report and generate the FOUNDATION ASSESSMENT.
 ${BASE_RULES}`;
 
@@ -131,17 +150,28 @@ export const STEP1_SCHEMA = `{
     "majorRootCauses": ["cause 1", "cause 2"],
     "top5LongTermRisks": ["risk 1", "risk 2", "risk 3", "risk 4", "risk 5"],
     "mostReversibleRisks": ["risk 1", "risk 2"],
-    "biologicalAgeInterpretation": "Interpretation vs chronological age",
+    "biologicalAgeInterpretation": "Interpretation vs chronological age including vascular age if applicable",
     "prognosisIfCompliant": "Expected outcomes if plan followed",
     "prognosisIfNonCompliant": "Expected outcomes if plan ignored"
   },
   "redFlagFindings": [
-    { "finding": "description", "urgency": "immediate|within_1_week|within_1_month", "action": "recommended action" }
+    {
+      "finding": "description of dangerous finding",
+      "urgency": "immediate|within_1_week|within_1_month",
+      "action": "recommended urgent action",
+      "type": "dangerous|urgent_specialist|high_risk_lab|overlooked_diagnosis"
+    }
   ],
   "rootCauseAnalysis": {
-    "summary": "Narrative of how root causes interact",
+    "summary": "Narrative of how root causes interact and compound each other",
     "drivers": [
-      { "cause": "cause name", "severity": "mild|moderate|severe", "mechanism": "how it drives disease", "reversible": true }
+      {
+        "cause": "e.g. Obesity|Smoking|Sleep deprivation|Insulin resistance|Sedentary lifestyle|Nutritional deficiencies|Chronic inflammation|Stress|Autonomic dysfunction|Fatty liver|Sarcopenia|Poor diet|Alcohol|Hormonal imbalance|Genetic risk",
+        "severity": "mild|moderate|severe",
+        "mechanism": "how it drives disease progression",
+        "reversible": true,
+        "progressionRiskIfIgnored": "what happens if this is not addressed"
+      }
     ]
   },
   "overallHealthStatus": {
@@ -188,69 +218,82 @@ ${STEP1_SCHEMA}`;
 
 // ─── STEP 2: Short-Term Plan (0–3 months) ────────────────────────────────────
 
-export const STEP2_SYSTEM_PROMPT = `You are a Preventive Medicine and Lifestyle Medicine expert.
+export const STEP2_SYSTEM_PROMPT = `You are an advanced Lifestyle, Prevention, and Metabolic Health Consultant combining expertise in lifestyle medicine, preventive cardiology, obesity medicine, nutrition science, sleep medicine, exercise medicine, functional health, and risk reduction strategy.
 Generate the SHORT-TERM ACTION PLAN (0–3 months) for the patient.
-${BASE_RULES}`;
+${BASE_RULES}
+${PROGRAMME_RULES}`;
 
 export const STEP2_SCHEMA = `{
   "shortTermPlan": {
-    "immediateProrirites": ["priority 1", "priority 2"],
-    "lifestyle": {
-      "diet": ["change 1"],
-      "exercise": ["recommendation 1"],
-      "sleep": ["tip 1"],
-      "stress": ["technique 1"],
-      "smokingCessation": "advice or null",
-      "alcoholReduction": "advice or null",
-      "mealTiming": "recommendation",
-      "hydration": "recommendation"
+    "sectionA_immediatePriorities": ["What should be addressed first and why — one sentence each"],
+    "sectionB_lifestyleChanges": {
+      "diet": "One sentence dietary change recommendation",
+      "exercise": "One sentence exercise recommendation",
+      "sleep": "One sentence sleep recommendation",
+      "stress": "One sentence stress management recommendation",
+      "smokingCessation": "One sentence advice or null if not applicable",
+      "alcoholReduction": "One sentence advice or null if not applicable",
+      "sunlight": "One sentence sunlight exposure recommendation",
+      "screenTime": "One sentence screen time recommendation",
+      "mealTiming": "One sentence meal timing recommendation",
+      "hydration": "One sentence hydration recommendation"
     },
-    "weightGoals": {
+    "sectionC_weightGoals": {
       "currentWeightKg": null,
       "initialTargetKg": null,
       "safeWeightLossPerWeekKg": null,
-      "waistReductionTargetCm": null
+      "waistReductionTargetCm": null,
+      "harshaWeightLossProgramme": "Include 'Dr. Harsha's Weight Loss Diet programme' if overweight/obese or null"
     },
-    "dietGoals": {
+    "sectionD_dietPlanGoals": {
       "dailyProteinTargetG": null,
       "dailyFiberTargetG": null,
+      "ultraProcessedFoodReduction": "Target reduction description",
       "sugarReductionG": null,
       "saltReductionG": null,
-      "mealStructure": "description",
-      "eatingBehaviourCorrections": ["correction 1"]
+      "oilReductionMl": null,
+      "mealStructure": "Meal timing and structure description",
+      "eatingBehaviourCorrections": ["correction 1"],
+      "harshaDietProgramme": "Applicable Dr. Harsha programme name (e.g. Diet for Diabetes / Pre-Diabetes / High BP / High Cholesterol / Heart Attack / Stroke) or null"
     },
-    "exerciseGoals": {
+    "sectionE_exerciseGoals": {
       "aerobicMinutesPerWeek": null,
       "strengthSessionsPerWeek": null,
+      "mobilityFlexibilityMinutesPerDay": null,
       "dailyStepTarget": null,
-      "mobilityMinutesPerDay": null,
-      "sedentaryBreakEveryMinutes": null
+      "sedentaryBreakEveryMinutes": null,
+      "exerciseAppRecommendation": "Follow Dr. Harsha's Exercise Health App (to be launched soon)"
     },
-    "sleepGoals": {
+    "sectionF_sleepGoals": {
       "targetHoursPerNight": null,
       "bedtimeTarget": "e.g. 10:00 PM",
       "wakeTimeTarget": "e.g. 6:00 AM",
-      "osaNotes": "OSA notes or null"
+      "osaNotes": "OSA management notes or null"
     },
-    "medicationConsiderations": [
-      { "category": "e.g. BP / Lipid / Diabetes", "recommendation": "Consider discussion regarding…" }
+    "sectionG_medicationConsiderations": [
+      { "category": "e.g. BP medicines|Lipid lowering|Diabetes medicines|Anti-obesity|Smoking cessation|Sleep therapy|Hormonal", "recommendation": "One sentence — Consider discussion regarding…" }
     ],
-    "supplementConsiderations": [
-      { "supplement": "name", "rationale": "evidence-based reason", "doseSuggestion": "dose or discuss with doctor" }
+    "sectionH_supplementConsiderations": [
+      { "supplement": "e.g. Vitamin D|B12|Iron|Magnesium|Omega-3|Protein|Creatine|Fiber", "oneSentence": "Evidence-based one-sentence recommendation" }
     ],
-    "investigationsNeeded": [
-      { "test": "test name", "rationale": "why needed", "urgency": "immediate|within_1_month|within_3_months" }
+    "sectionI_investigationsNeeded": [
+      { "test": "e.g. Blood tests|Imaging|Sleep study|Holter|Stress test|Fibroscan|CAC scan|Hormonal evaluation", "rationale": "why needed", "urgency": "immediate|within_1_month|within_3_months" }
     ],
-    "referrals": [
-      { "specialist": "name", "reason": "why", "urgency": "urgent|routine" }
+    "sectionJ_crossSpecialtyReferrals": [
+      { "specialist": "e.g. Cardiologist|Endocrinologist|Hepatologist|Pulmonologist|Sleep specialist|Psychiatrist|Physiotherapist|Bariatric surgeon|Ophthalmologist (NOT dietician)", "reason": "specific reason", "urgency": "urgent|routine" }
     ],
-    "monitoringPlan": {
-      "weightFrequency": "e.g. weekly",
-      "bpFrequency": "e.g. twice daily",
-      "sugarFrequency": "e.g. fasting weekly",
-      "repeatLabsAt": "e.g. 3 months"
+    "sectionK_electiveSurgicalConsiderations": [
+      { "intervention": "e.g. Bariatric surgery|CPAP|Joint procedure|Cataract|LASIK|Angiography|Prostate surgery", "indication": "when/why to consider" }
+    ],
+    "sectionL_monitoringPlan": {
+      "weightTracking": "frequency",
+      "bpMonitoring": "frequency",
+      "sugarMonitoring": "frequency",
+      "sleepTracking": "frequency",
+      "repeatLabsAt": "e.g. 3 months",
+      "repeatScansAt": "e.g. 6 months or as indicated"
     },
-    "expectedImprovements3Months": ["improvement 1", "improvement 2"]
+    "sectionM_expectedImprovements3Months": ["Realistic expected benefit 1", "benefit 2"]
   }
 }`;
 
@@ -271,7 +314,7 @@ export function buildStep2UserPrompt({ patient, riskTags, sections }) {
     formatSection("ANS ASSESSMENT", sections?.ansAssessment),
   ].filter(Boolean).join("\n");
 
-  return `Generate the SHORT-TERM PLAN (0–3 months) for this patient.
+  return `Generate the SHORT-TERM PLAN (0–3 months) for this patient across all sections A through M.
 
 ## PATIENT
 ${header}
@@ -288,7 +331,7 @@ ${STEP2_SCHEMA}`;
 
 // ─── STEP 3: Medium & Long-Term Plans ────────────────────────────────────────
 
-export const STEP3_SYSTEM_PROMPT = `You are a Preventive Medicine and Chronic Disease Management expert.
+export const STEP3_SYSTEM_PROMPT = `You are an advanced Lifestyle, Prevention, and Metabolic Health Consultant combining expertise in lifestyle medicine, preventive cardiology, obesity medicine, nutrition science, sleep medicine, exercise medicine, and chronic disease management.
 Generate the MEDIUM-TERM (3–12 months) and LONG-TERM (1–10 years) plans.
 ${BASE_RULES}`;
 
@@ -372,7 +415,7 @@ ${STEP3_SCHEMA}`;
 
 // ─── STEP 4: Treatment + Tests + Review ──────────────────────────────────────
 
-export const STEP4_SYSTEM_PROMPT = `You are a Clinical Medicine and Preventive Cardiology expert.
+export const STEP4_SYSTEM_PROMPT = `You are an advanced Lifestyle, Prevention, and Metabolic Health Consultant with deep expertise in clinical medicine, preventive cardiology, and conventional medical management.
 Generate TREATMENT ADVICE, ADDITIONAL TESTS, and NEXT REVIEW PLAN for the patient.
 ${BASE_RULES}`;
 
@@ -457,9 +500,14 @@ ${STEP4_SCHEMA}`;
 
 // ─── STEP 5: Lifestyle + Referrals + Handouts + Table ────────────────────────
 
-export const STEP5_SYSTEM_PROMPT = `You are a Lifestyle Medicine and Patient Education expert.
+export const STEP5_SYSTEM_PROMPT = `You are an advanced Lifestyle, Prevention, and Metabolic Health Consultant specialising in lifestyle medicine and patient education.
 Generate LIFESTYLE ADVICE, REFERRALS, PATIENT HANDOUTS, MOTIVATIONAL COUNSELLING, and the STRUCTURED ACTION TABLE.
-${BASE_RULES}`;
+${BASE_RULES}
+${PROGRAMME_RULES}
+MOTIVATIONAL COUNSELLING RULES:
+- Explain why action is urgent but AVOID fearmongering.
+- Describe what can realistically improve — AVOID unrealistic promises.
+- Emphasise importance of consistency and family support.`;
 
 export const STEP5_SCHEMA = `{
   "lifestyleAdvice": {
@@ -506,14 +554,19 @@ export const STEP5_SCHEMA = `{
     "emergencySigns": ["warning sign 1"]
   },
   "motivationalCounselling": {
-    "whyActNow": "Compelling honest reason for urgency",
-    "whatCanImprove": "Realistic description of what can improve",
-    "importanceOfConsistency": "Why consistency matters",
-    "importanceOfFamilySupport": "How family support accelerates outcomes",
-    "patientMessage": "Warm personal motivating message (2-3 sentences)"
+    "whyActNow": "Compelling honest reason for urgency — balanced, no fearmongering",
+    "whatCanImprove": "Realistic description of improvements possible with compliance",
+    "importanceOfConsistency": "Why sustained consistency matters more than perfection",
+    "importanceOfFamilySupport": "How family involvement accelerates outcomes",
+    "patientMessage": "Warm, personal, motivating message (2-3 sentences) to the patient"
   },
   "structuredTable": [
-    { "timeline": "0-1 month|0-3 months|3-12 months|1-5 years|5-10 years", "goal": "goal name", "action": "specific action", "target": "measurable target" }
+    {
+      "timeline": "0-1 month|0-3 months|3-12 months|1-5 years|5-10 years",
+      "goal": "goal name (e.g. Weight|BP|Sleep|Exercise|Smoking|Diet|Labs|Organ health|Mental health|Functional fitness)",
+      "action": "specific action to take",
+      "target": "measurable target"
+    }
   ]
 }`;
 
@@ -533,6 +586,8 @@ export function buildStep5UserPrompt({ patient, riskTags, shortTermGoals, sectio
     : "";
 
   return `Generate LIFESTYLE ADVICE, REFERRALS, HANDOUTS, MOTIVATIONAL COUNSELLING, and STRUCTURED TABLE.
+
+The structuredTable must cover ALL of: Weight, BP, Sleep, Exercise, Smoking, Diet, Labs, Organ health, Mental health, and Functional fitness — with rows across all timelines (0-1m, 0-3m, 3-12m, 1-5y, 5-10y) as applicable.
 
 ## PATIENT
 ${header}

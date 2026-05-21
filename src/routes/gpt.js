@@ -8718,22 +8718,113 @@ gptRouter.post(
   }
 );
 
+// ─── Holistic Plan — truncated JSON repair ────────────────────────────────────
+// When the AI response is cut off mid-JSON (token limit hit), the JSON is
+// structurally incomplete. This function tries to close all open brackets/braces
+// so that the partial response can still be parsed.
+function repairTruncatedJson(text) {
+  if (!requireString(text)) return null;
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+
+  let s = text.slice(start);
+  // Remove any trailing partial token (e.g. half-written string or key)
+  // Find the last complete value by walking backwards from end
+  // Strategy: trim trailing incomplete tokens then balance brackets
+  s = s.replace(/,\s*$/, ""); // trailing comma before cut-off
+
+  const stack = [];
+  let inString = false;
+  let escape = false;
+  let lastCompletePos = -1;
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") stack.push(ch);
+    else if (ch === "}" || ch === "]") {
+      stack.pop();
+      if (stack.length === 0) lastCompletePos = i;
+    }
+  }
+
+  // If JSON was fully balanced, just parse normally
+  if (lastCompletePos === s.length - 1) return safeParseJsonObject(s);
+
+  // Truncated: close all open brackets from the last known good cut-point
+  // Find the last position where a value ended cleanly (before the cut)
+  let repaired = s;
+  // Remove everything after the last complete object-value end
+  // by searching backwards for the last }, ], ", number, true, false, null
+  const lastClean = Math.max(
+    repaired.lastIndexOf("}"),
+    repaired.lastIndexOf("]"),
+    repaired.lastIndexOf('"'),
+    repaired.lastIndexOf("true"),
+    repaired.lastIndexOf("false"),
+    repaired.lastIndexOf("null")
+  );
+  if (lastClean > 0) {
+    repaired = repaired.slice(0, lastClean + 1).replace(/,\s*$/, "");
+  }
+
+  // Re-count stack to know what needs closing
+  const closeStack = [];
+  inString = false;
+  escape = false;
+  for (let i = 0; i < repaired.length; i++) {
+    const ch = repaired[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") closeStack.push("}");
+    else if (ch === "[") closeStack.push("]");
+    else if ((ch === "}" || ch === "]") && closeStack.length > 0) closeStack.pop();
+  }
+
+  repaired += closeStack.reverse().join("");
+  return safeParseJsonObject(repaired) ?? null;
+}
+
 // ─── Holistic Plan — shared AI call helper ────────────────────────────────────
 async function runHolisticPlanAi({ provider, openai, systemPrompt, userPrompt, maxTokens = 4096 }) {
   const resolvedProvider = normalizeAiProvider(provider);
   let raw = "";
 
   if (resolvedProvider === "gemini" && hasGeminiKey()) {
-    const response = await geminiGenerateContent({
-      parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }],
-      model: process.env.Gemini_model || "gemini-2.5-flash",
-      temperature: 0.3,
-      maxOutputTokens: maxTokens
-    });
-    raw = getTextFromGeminiGenerateContentResponse(response);
+    // Use Gemini's JSON response mode to force valid JSON output
+    const finalModel = process.env.Gemini_model || "gemini-2.5-flash";
+    const response = await getFetch()(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(finalModel)}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": process.env.Gemini_api_key
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `${systemPrompt}\n\n${userPrompt}` }] }],
+          generationConfig: {
+            temperature: 0.3,
+            maxOutputTokens: Math.max(256, Math.trunc(maxTokens)),
+            responseMimeType: "application/json"
+          }
+        })
+      }
+    );
+    const gemJson = await response.json().catch(() => null);
+    if (!response.ok) {
+      const msg = gemJson?.error?.message || `Gemini request failed (${response.status})`;
+      throw new Error(msg);
+    }
+    raw = getTextFromGeminiGenerateContentResponse(gemJson);
   } else if (resolvedProvider === "claude" && hasAnthropicKey()) {
     const response = await anthropicCreateJsonMessage({
-      system: systemPrompt,
+      system: systemPrompt + "\n\nIMPORTANT: Return ONLY the raw JSON object. Do NOT wrap it in markdown code fences. Do NOT add any text before or after the JSON.",
       messages: [{ role: "user", content: userPrompt }],
       model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-20241022",
       temperature: 0.3,
@@ -8748,11 +8839,39 @@ async function runHolisticPlanAi({ provider, openai, systemPrompt, userPrompt, m
     raw = completion.choices?.[0]?.message?.content ?? "";
   }
 
-  // Strip markdown code fences that some models add even when told not to
-  raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "").trim();
+  // Robustly strip markdown code fences and surrounding text
+  const originalRaw = raw;
+  // First try: extract content inside code fences if present
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch?.[1]?.trim()) {
+    raw = fenceMatch[1].trim();
+  } else {
+    // No fences — just trim
+    raw = raw.trim();
+  }
 
-  const parsed = safeParseJsonObject(raw) ?? safeParseJsonObjectLoose(raw) ?? safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "");
-  if (!parsed) throw new Error("AI did not return valid JSON");
+  // Try all parsing strategies on the cleaned raw text
+  let parsed =
+    safeParseJsonObject(raw) ??
+    safeParseJsonObjectLoose(raw) ??
+    safeParseJsonObjectLoose(extractFirstJsonObjectText(raw) || "") ??
+    repairTruncatedJson(raw);
+
+  // If cleaned raw failed, try the original raw text too (in case the fence stripping damaged it)
+  if (!parsed && originalRaw !== raw) {
+    parsed =
+      safeParseJsonObject(originalRaw.trim()) ??
+      safeParseJsonObjectLoose(originalRaw.trim()) ??
+      safeParseJsonObjectLoose(extractFirstJsonObjectText(originalRaw) || "") ??
+      repairTruncatedJson(originalRaw);
+  }
+
+  if (!parsed) {
+    console.error("[HolisticPlan] AI response is not valid JSON. Raw length:", originalRaw.length,
+      "\nFirst 500 chars:", originalRaw.slice(0, 500),
+      "\nLast 300 chars:", originalRaw.slice(-300));
+    throw new Error("AI did not return valid JSON");
+  }
   return parsed;
 }
 
@@ -8792,7 +8911,7 @@ gptRouter.post("/holistic-plan/step1", holisticJson, async (req, res) => {
       provider, openai,
       systemPrompt: STEP1_SYSTEM_PROMPT,
       userPrompt: buildStep1UserPrompt({ patient, sections, reportValues, personalization }),
-      maxTokens: 4096
+      maxTokens: 6144
     });
     res.json(result);
   } catch (err) {
@@ -8813,7 +8932,7 @@ gptRouter.post("/holistic-plan/step2", holisticJson, async (req, res) => {
       provider, openai,
       systemPrompt: STEP2_SYSTEM_PROMPT,
       userPrompt: buildStep2UserPrompt({ patient, riskTags, sections }),
-      maxTokens: 4096
+      maxTokens: 8192
     });
     res.json(result);
   } catch (err) {
@@ -8877,7 +8996,7 @@ gptRouter.post("/holistic-plan/step5", holisticJson, async (req, res) => {
       provider, openai,
       systemPrompt: STEP5_SYSTEM_PROMPT,
       userPrompt: buildStep5UserPrompt({ patient, riskTags, shortTermGoals, sections }),
-      maxTokens: 6144
+      maxTokens: 8192
     });
     res.json(result);
   } catch (err) {
