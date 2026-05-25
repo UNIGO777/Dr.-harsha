@@ -501,32 +501,65 @@ function computeExerciseAssessment({ patient, assessment }) {
               ? "Vigorous"
               : null;
 
-  let score = 100;
-  if (Number.isFinite(rhr)) {
-    if (rhr >= 90) score -= 20;
-    else if (rhr >= 80) score -= 10;
-    else if (rhr >= 70) score -= 5;
-  }
-  if (Number.isFinite(sixMwt) && functionalTestType === "6mwt") {
-    if (sixMwt < 300) score -= 25;
-    else if (sixMwt < 400) score -= 15;
-    else if (sixMwt < 550) score -= 5;
-  }
-  if (Number.isFinite(hrRecovery)) {
-    if (hrRecovery < 12) score -= 20;
-    else if (hrRecovery < 20) score -= 10;
-  }
-  if (Number.isFinite(sts)) {
-    if (sts > 15) score -= 15;
-    else if (sts >= 10) score -= 5;
-  }
-  if (gripWeakness) score -= 10;
-  if (talk === "cannot" || (Number.isFinite(borg) && borg >= 8)) score -= 30;
-  if (Number.isFinite(hrmaxPercent) && hrmaxPercent > 93) score -= 10;
-  score = Math.max(0, Math.min(100, Math.round(score)));
+  // ── Domain scoring: 0–21 scale, higher = more risk ───────────────────────
+  // B — Vitals: RHR (0-2) + HR Recovery (0-2) = max 4
+  const hrVitalScore =
+    !Number.isFinite(rhr) ? null
+    : rhr < 60 ? 0          // Excellent
+    : rhr <= 80 ? 0          // Normal
+    : rhr <= 90 ? 1          // Mildly elevated
+    : 2;                     // High risk
 
-  let grade = score >= 85 ? "A" : score >= 70 ? "B" : score >= 50 ? "C" : "D";
-  if (hasStop || (Number.isFinite(hrRecovery) && hrRecovery < 12)) grade = "D";
+  const hrRecoveryScore =
+    !Number.isFinite(hrRecovery) ? null
+    : hrRecovery >= 20 ? 0   // Excellent
+    : hrRecovery >= 12 ? 1   // Normal
+    : 2;                     // Poor autonomic fitness
+
+  // C — Functional capacity (max 3)
+  const functionalScore = (() => {
+    if (functionalTestType === "6mwt" && Number.isFinite(sixMwt) && sixMwt > 0) {
+      return sixMwt > 500 ? 0 : sixMwt >= 400 ? 1 : sixMwt >= 300 ? 2 : 3;
+    }
+    if (functionalTestType === "2min_step" && Number.isFinite(stepCount) && stepCount > 0) {
+      return stepCount >= 90 ? 0 : stepCount >= 70 ? 1 : stepCount >= 50 ? 2 : 3;
+    }
+    if (Number.isFinite(sts) && sts > 0) {
+      return sts < 10 ? 0 : sts <= 15 ? 1 : sts <= 20 ? 2 : 3;
+    }
+    return null;
+  })();
+
+  // E — Grip strength: use best hand (max 3)
+  const gripMax = [gripR, gripL].filter((n) => Number.isFinite(n) && n > 0)
+    .reduce((mx, n) => (n > mx ? n : mx), -Infinity);
+  const gripDomainScore = (() => {
+    if (!Number.isFinite(gripMax) || gripMax <= 0) return null;
+    if (sex === "male") return gripMax >= 30 ? 0 : gripMax >= 26 ? 1 : gripMax >= 20 ? 2 : 3;
+    return gripMax >= 20 ? 0 : gripMax >= 16 ? 1 : gripMax >= 12 ? 2 : 3;
+  })();
+
+  // F — Borg breathlessness (max 3)
+  const borgDomainScore =
+    !Number.isFinite(borg) ? null
+    : borg <= 2 ? 0 : borg <= 4 ? 1 : borg <= 6 ? 2 : 3;
+
+  const domainBreakdown = [
+    { label: "B — Resting HR",    score: hrVitalScore,     max: 2 },
+    { label: "B — HR Recovery",   score: hrRecoveryScore,  max: 2 },
+    { label: "C — Functional",    score: functionalScore,  max: 3 },
+    { label: "E — Grip Strength", score: gripDomainScore,  max: 3 },
+    { label: "F — Borg Scale",    score: borgDomainScore,  max: 3 },
+  ];
+
+  const allDomainScores = [hrVitalScore, hrRecoveryScore, functionalScore, gripDomainScore, borgDomainScore];
+  const hasDomainData = allDomainScores.some((s) => s != null);
+  const score = hasDomainData
+    ? allDomainScores.reduce((sum, s) => (s != null ? sum + s : sum), 0)
+    : 0;
+
+  // Grade thresholds: 0–4 = A, 5–8 = B, 9–13 = C, 14–21 = D
+  const grade = score <= 4 ? "A" : score <= 8 ? "B" : score <= 13 ? "C" : "D";
 
   return {
     agePredictedMaxHrBpm: apmhr,
@@ -544,6 +577,7 @@ function computeExerciseAssessment({ patient, assessment }) {
     finalCategory,
     score,
     grade,
+    domainBreakdown,
     safetyFlags
   };
 }
@@ -4221,7 +4255,10 @@ async function generateAdultVaccinationWithAi({ openai, provider, patient, extra
       schedule: typeof hepatitisB?.schedule === "string" ? hepatitisB.schedule : ""
     },
     hepatitisA: { planned: normalizeYesNo(hepatitisA?.planned ?? hepatitisA?.recommended) },
-    cervicalCancer: { planned: normalizeYesNo(cervicalCancer?.planned ?? cervicalCancer?.recommended) },
+    cervicalCancer: {
+      alreadyDone: normalizeYesNo(cervicalCancer?.alreadyDone ?? cervicalCancer?.done),
+      recommended: normalizeYesNo(cervicalCancer?.recommended)
+    },
     notes: Array.isArray(root?.notes) ? root.notes : []
   };
 

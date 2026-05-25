@@ -21,15 +21,23 @@ const BASE_RULES = `RULES:
 - Give quantified goals wherever possible.`;
 
 // ─── Dr. Harsha programme recommendation rules ─────────────────────────────
-const PROGRAMME_RULES = `DR. HARSHA PROGRAMME RECOMMENDATIONS (include in relevant plan sections):
-- If Diabetic → recommend "Dr. Harsha's Diet for Diabetes programme"
-- If Pre-diabetic → recommend "Dr. Harsha's Pre-Diabetes Diet programme"
-- If Hypertensive → recommend "Dr. Harsha's Diet for High BP programme"
-- If overweight/obese → recommend "Dr. Harsha's Weight Loss Diet programme"
-- If Dyslipidaemia → recommend "Dr. Harsha's Diet for High Cholesterol programme"
-- If Heart Attack history → recommend "Dr. Harsha's Diet for Heart Attack programme"
-- If Stroke history → recommend "Dr. Harsha's Diet for Stroke programme"
-- For exercise section always mention: "Follow Dr. Harsha's Exercise Health App (to be launched soon)"
+const PROGRAMME_RULES = `DR. HARSHA PROGRAMME RECOMMENDATIONS — MANDATORY IN EVERY REPORT:
+DIET (mandatory for ALL patients regardless of health status):
+- ALWAYS end the dietPlan section with a strong recommendation for Dr. Harsha's applicable Diet Programme.
+- If Diabetic → "Dr. Harsha's Diet for Diabetes programme"
+- If Pre-diabetic → "Dr. Harsha's Pre-Diabetes Diet programme"
+- If Hypertensive → "Dr. Harsha's Diet for High BP programme"
+- If overweight/obese → "Dr. Harsha's Weight Loss Diet programme"
+- If Dyslipidaemia → "Dr. Harsha's Diet for High Cholesterol programme"
+- If Heart Attack history → "Dr. Harsha's Diet for Heart Attack programme"
+- If Stroke history → "Dr. Harsha's Diet for Stroke programme"
+- If none of the above apply → still recommend "Dr. Harsha's Healthy Living Diet programme"
+- Include this in the dietPlan.harshaRecommendation field AND mention it in the dietary approach text.
+EXERCISE (mandatory for ALL patients):
+- ALWAYS end the exercisePlan section with: "Follow Dr. Harsha's Exercise Health App (to be launched soon) for a personalised, structured workout plan."
+- Include this in exercisePlan.fitnessAppRecommendation.
+SLEEP & STRESS (mandatory for ALL patients):
+- ALWAYS recommend "Dr. Harsha's Sleep & Stress Management Programme" in the sleep hygiene and stress management sections.
 - Do NOT include dietician as a cross-specialty referral.`;
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -519,17 +527,20 @@ export const STEP5_SCHEMA = `{
       "portionControl": "guidance",
       "cookingTips": ["tip 1"],
       "eatingOutTips": ["tip 1"],
-      "fitnessAppRecommendation": "e.g. MyFitnessPal"
+      "fitnessAppRecommendation": "e.g. MyFitnessPal",
+      "harshaRecommendation": "e.g. Dr. Harsha's Diet for Diabetes programme — always include applicable programme name"
     },
     "exercisePlan": {
       "weeklyStructure": "e.g. 5 days aerobic + 2 days strength",
       "recommendedActivities": ["activity 1"],
       "progressionPlan": "how to progress over 3 months",
       "precautions": ["precaution 1"],
-      "fitnessAppRecommendation": "e.g. Google Fit / Strava"
+      "fitnessAppRecommendation": "Follow Dr. Harsha's Exercise Health App (to be launched soon) for a personalised, structured workout plan."
     },
     "sleepHygiene": ["tip 1", "tip 2"],
+    "sleepHarshaRecommendation": "Follow Dr. Harsha's Sleep & Stress Management Programme for personalised guidance.",
     "stressManagement": ["technique 1"],
+    "stressHarshaRecommendation": "Follow Dr. Harsha's Sleep & Stress Management Programme for personalised guidance.",
     "habitChangeGoals": [
       { "habit": "habit to change", "target": "specific goal", "timeline": "timeline" }
     ]

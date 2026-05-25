@@ -14,7 +14,7 @@ export const ADULT_VACCINATION_SCHEMA_HINT = `{
     "shingrix": { "planned": "", "dose1": "", "dose2": "" },
     "hepatitisB": { "planned": "", "schedule": "0-1-6 months" },
     "hepatitisA": { "planned": "" },
-    "cervicalCancer": { "planned": "" },
+    "cervicalCancer": { "alreadyDone": "", "recommended": "" },
     "notes": []
   }
 }`;
@@ -49,7 +49,8 @@ export function buildAdultVaccinationUserPrompt({ patient, extractedText }) {
     ADULT_VACCINATION_SCHEMA_HINT,
     "",
     "Rules:",
-    "- Use planned: 'yes' | 'no' | '' (empty string if unknown).",
+    "- Use planned: 'yes' | 'no' | '' (empty string if unknown) for all vaccines except cervicalCancer.",
+    "- For cervicalCancer: alreadyDone = 'yes'|'no'|'' (has the patient already received the vaccine?); recommended = 'yes'|'no'|'' (is it recommended for this patient?).",
     "- Use pneumonia.vaccine as 'prevnar_20' if stated as Prevenar/Prevnar 20.",
     "- Use hepatitisB.schedule as the exact schedule string if present (e.g., '0-1-6 months').",
     "- riskFactors must be an array of canonical values chosen ONLY from the allowed list below.",
