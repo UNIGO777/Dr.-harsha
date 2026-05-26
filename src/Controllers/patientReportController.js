@@ -387,7 +387,7 @@ export async function getPatientReportController(req, res) {
 }
 export async function savePatientReportController(req, res) {
   try {
-    const access = await ensurePatientReportAccess({ req, allowDoctor: false });
+    const access = await ensurePatientReportAccess({ req, allowDoctor: true });
     if (access.error) return res.status(access.error.status).json(access.error.body);
 
     const reportId = normalizeString(req?.params?.reportId || req?.body?.reportId);
@@ -406,8 +406,11 @@ export async function savePatientReportController(req, res) {
       return res.status(404).json({ error: "Patient report not found" });
     }
 
-    report.assignedNurse = access.actorId;
-    report.assignedDoctor = access.managedDoctor?._id || null;
+    // Only nurses update assignedNurse — doctors editing a report must not overwrite it
+    if (access.actor?.role === "nurse") {
+      report.assignedNurse = access.actorId;
+      report.assignedDoctor = access.managedDoctor?._id || null;
+    }
     report.reportValues = reportValues;
     report.generatedReport = req?.body?.generatedReport ?? report.generatedReport ?? null;
     report.advancedBodyComposition = req?.body?.advancedBodyComposition ?? report.advancedBodyComposition ?? null;
@@ -451,7 +454,7 @@ export async function savePatientReportController(req, res) {
 
 export async function uploadPatientReportDocumentsController(req, res) {
   try {
-    const access = await ensurePatientReportAccess({ req, allowDoctor: false });
+    const access = await ensurePatientReportAccess({ req, allowDoctor: true });
     if (access.error) return res.status(access.error.status).json(access.error.body);
 
     const reportId = normalizeString(req?.params?.reportId || req?.body?.reportId);
@@ -564,7 +567,7 @@ export async function downloadPatientReportDocumentController(req, res) {
 }
 export async function deletePatientReportDocumentController(req, res) {
   try {
-    const access = await ensurePatientReportAccess({ req, allowDoctor: false });
+    const access = await ensurePatientReportAccess({ req, allowDoctor: true });
     if (access.error) return res.status(access.error.status).json(access.error.body);
 
     const reportId = normalizeString(req?.params?.reportId);

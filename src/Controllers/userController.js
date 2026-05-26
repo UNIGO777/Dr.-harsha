@@ -1176,6 +1176,155 @@ export async function getNursePatientProfileController(req, res) {
   }
 }
 
+export async function listDoctorPatientsController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id;
+    const search = typeof req?.query?.search === "string" ? req.query.search.trim() : "";
+    const priority = typeof req?.query?.priority === "string" ? req.query.priority.trim().toLowerCase() : "";
+
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+
+    if (priority && !["low", "medium", "high", "critical"].includes(priority)) {
+      return res.status(400).json({ error: "Invalid priority" });
+    }
+
+    const patientProfiles = await PatientProfile.find({ assignedDoctors: doctorId })
+      .populate("user", "name email role phone gender status userNumber createdAt updatedAt lastLoginAt")
+      .populate("assignedDoctors", "name email phone status userNumber")
+      .populate("assignedNurses", "name email phone status userNumber")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const doctor = await User.findById(doctorId).lean();
+
+    const patients = patientProfiles
+      .map((profile) => buildPatientManagementResponse({ profile, managedDoctor: doctor }))
+      .filter(Boolean)
+      .filter((patient) => (!search ? true : matchesPatientManagementSearch(patient, search)))
+      .filter((patient) => (!priority ? true : patient.priority === priority));
+
+    return res.json({ patients, summary: buildPatientManagementSummary(patients) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to fetch doctor patients";
+    return res.status(500).json({ error: message });
+  }
+}
+
+export async function getDoctorPatientProfileController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id;
+    const patientId = req?.params?.patientId;
+
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+
+    const patientProfileDocument = await PatientProfile.findOne({
+      user: patientId,
+      assignedDoctors: doctorId,
+    })
+      .populate("user", "name email role phone gender status userNumber createdAt updatedAt lastLoginAt")
+      .populate("assignedDoctors", "name email phone status userNumber")
+      .populate("assignedNurses", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .populate("medications.doctor", "name email phone status userNumber")
+      .populate("medications.addedBy", "name email phone status userNumber");
+
+    if (!patientProfileDocument?._id) {
+      return res.status(404).json({ error: "Patient not found in your assignment" });
+    }
+
+    if (ensurePatientProfileNotesHaveIds(patientProfileDocument)) {
+      await patientProfileDocument.save();
+    }
+
+    const patientProfile = patientProfileDocument.toObject();
+    const doctor = await User.findById(doctorId).lean();
+
+    const now = new Date();
+    const [futureFollowUps, followUpHistory, upcomingAppointments, appointmentHistory] = await Promise.all([
+      CrmTask.find({
+        patient: patientProfile.user._id,
+        assignedDoctor: doctorId,
+        status: { $in: ["pending", "in_progress"] },
+        $or: [{ followUpAt: { $gte: now } }, { dueAt: { $gte: now } }],
+      })
+        .populate("assignedDoctor", "name email phone status userNumber")
+        .populate("assignedNurse", "name email phone status userNumber")
+        .populate("linkedNextTask", "title status priority followUpAt dueAt")
+        .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
+        .populate("notes.createdBy", "name email phone status userNumber")
+        .sort({ followUpAt: 1, dueAt: 1, updatedAt: -1 })
+        .limit(8)
+        .lean(),
+      CrmTask.find({
+        patient: patientProfile.user._id,
+        assignedDoctor: doctorId,
+        $or: [{ followUpAt: { $lt: now } }, { completedAt: { $ne: null, $lt: now } }],
+      })
+        .populate("assignedDoctor", "name email phone status userNumber")
+        .populate("assignedNurse", "name email phone status userNumber")
+        .populate("linkedNextTask", "title status priority followUpAt dueAt")
+        .populate("linkedAppointment", "scheduledAt endsAt status outcome reason")
+        .populate("notes.createdBy", "name email phone status userNumber")
+        .sort({ followUpAt: -1, completedAt: -1, updatedAt: -1 })
+        .limit(8)
+        .lean(),
+      Appointment.find({
+        patient: patientProfile.user._id,
+        doctor: doctorId,
+        scheduledAt: { $gte: now },
+        status: { $nin: TERMINAL_APPOINTMENT_STATUSES },
+      })
+        .populate("doctor", "name email phone status userNumber")
+        .populate("scheduledBy", "name email phone status userNumber")
+        .sort({ scheduledAt: 1, updatedAt: -1 })
+        .limit(8)
+        .lean(),
+      Appointment.find({
+        patient: patientProfile.user._id,
+        doctor: doctorId,
+        $or: [{ scheduledAt: { $lt: now } }, { status: { $in: TERMINAL_APPOINTMENT_STATUSES } }],
+      })
+        .populate("doctor", "name email phone status userNumber")
+        .populate("scheduledBy", "name email phone status userNumber")
+        .sort({ scheduledAt: -1, updatedAt: -1 })
+        .limit(8)
+        .lean(),
+    ]);
+
+    const recentNotes = Array.isArray(patientProfile.notes)
+      ? [...patientProfile.notes]
+          .sort((a, b) => new Date(b?.createdAt || 0).getTime() - new Date(a?.createdAt || 0).getTime())
+          .slice(0, 50)
+      : [];
+
+    return res.json({
+      patient: {
+        ...buildPatientManagementResponse({ profile: patientProfile, managedDoctor: doctor }),
+        notes: recentNotes.map((note) => buildPatientProfileNoteResponse(note)).filter(Boolean),
+        medications: Array.isArray(patientProfile.medications)
+          ? [...patientProfile.medications]
+              .sort((l, r) => new Date(r?.createdAt || 0).getTime() - new Date(l?.createdAt || 0).getTime())
+              .map((med) => buildPatientMedicationResponse(med))
+              .filter(Boolean)
+          : [],
+        futureFollowUps: futureFollowUps.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
+        followUpHistory: followUpHistory.map((task) => buildPatientFollowUpHistoryResponse(task)).filter(Boolean),
+        upcomingAppointments: upcomingAppointments.map((a) => buildPatientAppointmentHistoryResponse(a, patientProfile.user)).filter(Boolean),
+        pastAppointments: appointmentHistory.map((a) => buildPatientAppointmentHistoryResponse(a, patientProfile.user)).filter(Boolean),
+        appointmentHistory: appointmentHistory.map((a) => buildPatientAppointmentHistoryResponse(a, patientProfile.user)).filter(Boolean),
+      },
+    });
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const message = err instanceof Error ? err.message : "Failed to fetch patient profile";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
 export async function addNursePatientProfileNoteController(req, res) {
   try {
     if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
@@ -1401,6 +1550,100 @@ export async function updateNursePatientProfileNoteController(req, res) {
       message: "Patient note updated successfully.",
       note: buildPatientProfileNoteResponse(updatedNote)
     });
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const message = err instanceof Error ? err.message : "Failed to update patient note";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function addDoctorPatientProfileNoteController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id;
+    const patientId = req?.params?.patientId;
+    const content = normalizeString(req?.body?.content);
+
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+    if (!content) return res.status(400).json({ error: "content is required" });
+
+    const patientProfile = await PatientProfile.findOne({ user: patientId, assignedDoctors: doctorId });
+    if (!patientProfile?._id) return res.status(404).json({ error: "Patient not found in your assignment" });
+
+    if (ensurePatientProfileNotesHaveIds(patientProfile)) await patientProfile.save();
+
+    patientProfile.notes.push({ content, createdBy: doctorId, createdAt: new Date(), updatedAt: null });
+    patientProfile.lastInteractionAt = new Date();
+    await patientProfile.save();
+
+    const updatedProfile = await PatientProfile.findById(patientProfile._id)
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+    const latestNote = Array.isArray(updatedProfile?.notes) ? updatedProfile.notes[updatedProfile.notes.length - 1] : null;
+
+    return res.status(201).json({ message: "Patient note added successfully.", note: buildPatientProfileNoteResponse(latestNote) });
+  } catch (err) {
+    const statusCode = err?.statusCode || 500;
+    const message = err instanceof Error ? err.message : "Failed to add patient note";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function updateDoctorPatientProfileNoteController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id;
+    const patientId = req?.params?.patientId;
+    const noteId = typeof req?.params?.noteId === "string" ? req.params.noteId.trim() : "";
+    const content = normalizeString(req?.body?.content);
+    const legacyCreatedAt = typeof req?.body?.legacyCreatedAt === "string" ? req.body.legacyCreatedAt.trim() : "";
+
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+    if (!noteId) return res.status(400).json({ error: "noteId is required" });
+    if (!content) return res.status(400).json({ error: "content is required" });
+
+    const patientProfile = await PatientProfile.findOne({ user: patientId, assignedDoctors: doctorId });
+    if (!patientProfile?._id) return res.status(404).json({ error: "Patient not found in your assignment" });
+
+    if (ensurePatientProfileNotesHaveIds(patientProfile)) await patientProfile.save();
+
+    const targetNote = Array.isArray(patientProfile.notes)
+      ? patientProfile.notes.find((note) => note?._id?.toString() === noteId)
+      : null;
+
+    const legacyTargetNote =
+      targetNote || !legacyCreatedAt
+        ? targetNote
+        : Array.isArray(patientProfile.notes)
+          ? patientProfile.notes.find((note) => {
+              const noteCreatedAt = note?.createdAt ? new Date(note.createdAt).toISOString() : "";
+              return noteCreatedAt && noteCreatedAt === legacyCreatedAt;
+            })
+          : null;
+
+    if (!legacyTargetNote) return res.status(404).json({ error: "Patient note not found" });
+
+    legacyTargetNote.content = content;
+    legacyTargetNote.updatedAt = new Date();
+    patientProfile.lastInteractionAt = new Date();
+    await patientProfile.save();
+
+    const updatedProfile = await PatientProfile.findById(patientProfile._id)
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    const updatedNote = Array.isArray(updatedProfile?.notes)
+      ? updatedProfile.notes.find((note) => {
+          if (note?._id?.toString() === legacyTargetNote?._id?.toString()) return true;
+          if (!legacyCreatedAt) return false;
+          const noteCreatedAt = note?.createdAt ? new Date(note.createdAt).toISOString() : "";
+          return noteCreatedAt && noteCreatedAt === legacyCreatedAt;
+        })
+      : null;
+
+    return res.json({ message: "Patient note updated successfully.", note: buildPatientProfileNoteResponse(updatedNote) });
   } catch (err) {
     const statusCode = err?.statusCode || 500;
     const message = err instanceof Error ? err.message : "Failed to update patient note";

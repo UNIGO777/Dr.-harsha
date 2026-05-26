@@ -278,9 +278,6 @@ export const STEP2_SCHEMA = `{
       "wakeTimeTarget": "e.g. 6:00 AM",
       "osaNotes": "OSA management notes or null"
     },
-    "sectionG_medicationConsiderations": [
-      { "category": "e.g. BP medicines|Lipid lowering|Diabetes medicines|Anti-obesity|Smoking cessation|Sleep therapy|Hormonal", "recommendation": "One sentence — Consider discussion regarding…" }
-    ],
     "sectionH_supplementConsiderations": [
       { "supplement": "e.g. Vitamin D|B12|Iron|Magnesium|Omega-3|Protein|Creatine|Fiber", "oneSentence": "Evidence-based one-sentence recommendation" }
     ],
@@ -424,34 +421,14 @@ ${STEP3_SCHEMA}`;
 // ─── STEP 4: Treatment + Tests + Review ──────────────────────────────────────
 
 export const STEP4_SYSTEM_PROMPT = `You are an advanced Lifestyle, Prevention, and Metabolic Health Consultant with deep expertise in clinical medicine, preventive cardiology, and conventional medical management.
-Generate TREATMENT ADVICE, ADDITIONAL TESTS, and NEXT REVIEW PLAN for the patient.
+Generate TREATMENT ADVICE and NEXT REVIEW PLAN for the patient.
 ${BASE_RULES}`;
 
 export const STEP4_SCHEMA = `{
   "treatmentAdvice": {
     "summary": "Overall treatment philosophy for this patient",
-    "medications": [
-      { "category": "e.g. Antihypertensive / Statin", "recommendation": "Consider discussion regarding…", "priority": "immediate|short_term|long_term" }
-    ],
     "procedures": [
       { "procedure": "name", "indication": "when/why to consider" }
-    ],
-    "specialistCare": [
-      { "specialist": "name", "role": "what they should manage" }
-    ]
-  },
-  "additionalTests": {
-    "bloodTests": [
-      { "test": "name", "rationale": "why needed", "urgency": "immediate|within_1_month|within_3_months|annual" }
-    ],
-    "imaging": [
-      { "scan": "name", "rationale": "why needed", "urgency": "immediate|within_1_month|within_3_months|annual" }
-    ],
-    "specialisedTests": [
-      { "test": "e.g. Sleep study / Fibroscan", "rationale": "why needed", "urgency": "immediate|within_1_month|within_3_months" }
-    ],
-    "crossConsultations": [
-      { "specialist": "name", "reason": "reason", "urgency": "urgent|routine" }
     ]
   },
   "nextReviewPlan": {
@@ -546,9 +523,6 @@ export const STEP5_SCHEMA = `{
     ]
   },
   "referralFeedback": {
-    "specialistReferrals": [
-      { "specialist": "name", "reason": "specific reason", "urgency": "urgent|routine", "whatToTell": "brief for specialist" }
-    ],
     "scannerReferrals": [
       { "facility": "e.g. Radiology center", "scanRequired": "scan name", "reason": "indication" }
     ],

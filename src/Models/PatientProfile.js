@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 const PATIENT_SERVICE_OPTIONS = ["Health check", "Diabetic", "Senior citizen", "Men", "Women", "Advanced programs", "Diet course"];
 const PATIENT_TAG_OPTIONS = ["Stroke", "Diabetes", "Heart health", "BP", "Cholesterol", "Kidney", "Knee pain", "Other"];
 const PATIENT_MEDICATION_TIME_SLOTS = ["morning", "afternoon", "evening", "night"];
-const PATIENT_MEDICATION_DURATION_UNITS = ["days", "weeks", "months"];
+const PATIENT_MEDICATION_DURATION_UNITS = ["hours", "days", "weeks", "months"];
 const PATIENT_MEDICATION_FOOD_TIMING_OPTIONS = ["before_food", "after_food"];
 
 const patientProfileNoteSchema = new mongoose.Schema(

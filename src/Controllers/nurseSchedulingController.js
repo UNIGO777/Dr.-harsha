@@ -1063,8 +1063,11 @@ export async function generateNurseAppointmentInstructionDraftController(req, re
   try {
     if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
 
-    const nurseId = req?.user?._id?.toString?.() || "";
-    if (!nurseId) return res.status(401).json({ error: "Unauthorized" });
+    const userId = req?.user?._id?.toString?.() || "";
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    const userRole = req?.user?.role || "";
+    const isDoctor = userRole === "doctor";
 
     const appointmentId = normalizeString(req?.params?.appointmentId);
     const prompt = normalizeString(req?.body?.prompt);
@@ -1075,7 +1078,6 @@ export async function generateNurseAppointmentInstructionDraftController(req, re
       return res.status(400).json({ error: "Invalid appointmentId" });
     }
 
-    const managedDoctor = await getManagedDoctorForNurse(nurseId);
     const appointment = await Appointment.findOne({ _id: appointmentId })
       .populate("patient", "name email phone status userNumber")
       .populate("doctor", "name email phone status userNumber")
@@ -1087,21 +1089,41 @@ export async function generateNurseAppointmentInstructionDraftController(req, re
       return res.status(404).json({ error: "Appointment not found" });
     }
 
-    if (appointment.doctor?._id?.toString?.() !== managedDoctor._id?.toString?.()) {
-      return res.status(403).json({ error: "This appointment is outside your assignment scope" });
-    }
+    let patientProfile;
+    let contextDoctor;
 
-    const patientProfile = await ensurePatientInNurseScope({
-      patientId: appointment.patient?._id?.toString?.() || "",
-      nurseId,
-      managedDoctorId: managedDoctor._id
-    });
+    if (isDoctor) {
+      // Doctor path: appointment must belong to this doctor
+      if (appointment.doctor?._id?.toString?.() !== userId) {
+        return res.status(403).json({ error: "This appointment is outside your assignment scope" });
+      }
+      patientProfile = await PatientProfile.findOne({
+        user: appointment.patient?._id,
+        assignedDoctors: userId
+      }).lean();
+      if (!patientProfile?._id) {
+        return res.status(403).json({ error: "This patient is outside your assignment scope" });
+      }
+      contextDoctor = appointment.doctor;
+    } else {
+      // Nurse path: existing scope checks
+      const managedDoctor = await getManagedDoctorForNurse(userId);
+      if (appointment.doctor?._id?.toString?.() !== managedDoctor._id?.toString?.()) {
+        return res.status(403).json({ error: "This appointment is outside your assignment scope" });
+      }
+      patientProfile = await ensurePatientInNurseScope({
+        patientId: appointment.patient?._id?.toString?.() || "",
+        nurseId: userId,
+        managedDoctorId: managedDoctor._id
+      });
+      contextDoctor = managedDoctor;
+    }
 
     const draft = await generateAiAppointmentInstructionDraft({
       appointment,
       patientProfile,
       nurseUser: req.user,
-      managedDoctor,
+      managedDoctor: contextDoctor,
       prompt,
       tone,
       extraInstructions
@@ -1112,7 +1134,7 @@ export async function generateNurseAppointmentInstructionDraftController(req, re
       draft,
       appointment: buildAppointmentResponse(appointment),
       context: {
-        managedDoctor: buildUserOption(managedDoctor)
+        managedDoctor: buildUserOption(contextDoctor)
       }
     });
   } catch (err) {
@@ -1558,6 +1580,465 @@ export async function updateNurseAppointmentController(req, res) {
   } catch (err) {
     const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
     const message = err instanceof Error ? err.message : "Failed to update appointment";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function scheduleDoctorAppointmentController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id?.toString?.() || "";
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+
+    const patientId = normalizeString(req?.body?.patientId);
+    const reason = normalizeString(req?.body?.reason);
+    const scheduledAt = normalizeDate(req?.body?.scheduledAt, "scheduledAt");
+    const appointmentType = normalizeString(req?.body?.appointmentType).toLowerCase() || "in_person";
+    const preparationInstructions = normalizeString(req?.body?.preparationInstructions);
+    const documentsRequired = normalizeBoolean(req?.body?.documentsRequired);
+    const reportsRequired = normalizeBoolean(req?.body?.reportsRequired);
+    const preVisitUpdateRequired = normalizeBoolean(req?.body?.preVisitUpdateRequired);
+
+    if (!patientId) return res.status(400).json({ error: "patientId is required" });
+    if (!scheduledAt) return res.status(400).json({ error: "scheduledAt is required" });
+    if (!reason) return res.status(400).json({ error: "reason is required" });
+    if (!APPOINTMENT_TYPE_ENUM.includes(appointmentType)) {
+      return res.status(400).json({ error: "Invalid appointmentType" });
+    }
+
+    const [patient, doctor] = await Promise.all([
+      findUserByRole(patientId, "patient", "patient"),
+      findUserByRole(doctorId, "doctor", "doctor")
+    ]);
+
+    const patientProfile = await PatientProfile.findOne({ user: patient._id, assignedDoctors: doctor._id }).lean();
+    if (!patientProfile?._id) {
+      return res.status(403).json({ error: "This patient is outside your assignment scope" });
+    }
+
+    const availability = await ensureDoctorAvailability({ doctor, scheduledAt });
+
+    const appointment = await Appointment.create({
+      patient: patient._id,
+      doctor: doctor._id,
+      scheduledBy: doctorId,
+      scheduledAt,
+      endsAt: availability.endsAt,
+      slotMinutes: availability.slotMinutes,
+      reason,
+      appointmentType,
+      status: "pending",
+      preparationInstructions,
+      documentsRequired,
+      reportsRequired,
+      preVisitUpdateRequired,
+      notes: [
+        {
+          type: "system",
+          channel: "desk",
+          message: `Appointment created for ${formatDateTimeLabel(scheduledAt)} as ${formatAppointmentTypeLabel(appointmentType)}.`,
+          createdBy: doctorId,
+          metadata: { status: "pending", appointmentType, reason },
+          createdAt: new Date()
+        }
+      ]
+    });
+
+    await createPreAppointmentFollowUpTask({ appointment, patient, doctor, nurseId: null, reason });
+    await syncPatientNextAppointment(patient._id);
+
+    const warnings = [];
+    if (!patient.email) {
+      warnings.push("Patient email is not available for appointment booking email.");
+    } else {
+      try {
+        const emailContent = buildAppointmentEmailContent({
+          actionType: "booked",
+          appointment: { ...appointment.toObject(), patient, doctor },
+          managedDoctor: doctor
+        });
+        await sendAdminCustomEmail({
+          toEmail: patient.email,
+          name: patient.name,
+          role: "patient",
+          subject: emailContent.subject,
+          message: emailContent.message,
+          summary: emailContent.summary,
+          userNumber: patient.userNumber
+        });
+        appointment.confirmationSentAt = new Date();
+        appointment.lastReminderType = "booked";
+        addAppointmentNote(appointment, {
+          type: "system",
+          channel: "email",
+          message: "Appointment booking email sent to patient.",
+          createdBy: doctorId,
+          metadata: { actionType: "booked" }
+        });
+        await appointment.save();
+      } catch (emailError) {
+        warnings.push(emailError instanceof Error ? emailError.message : "Failed to send appointment booking email");
+      }
+    }
+
+    const populatedAppointment = await Appointment.findById(appointment._id)
+      .populate("patient", "name email phone status userNumber")
+      .populate("doctor", "name email phone status userNumber")
+      .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    return res.status(201).json({
+      message: warnings.length === 0 ? "Appointment scheduled successfully." : "Appointment scheduled with warnings.",
+      appointment: buildAppointmentResponse(populatedAppointment),
+      warnings
+    });
+  } catch (err) {
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    const message = err instanceof Error ? err.message : "Failed to schedule appointment";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function scheduleDoctorFollowUpController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id?.toString?.() || "";
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+
+    const patientId = normalizeString(req?.body?.patientId);
+    const reason = normalizeString(req?.body?.reason);
+    const followUpAt = normalizeDate(req?.body?.followUpAt, "followUpAt");
+    const priority = ["low", "medium", "high", "critical"].includes(req?.body?.priority) ? req.body.priority : "medium";
+
+    if (!patientId) return res.status(400).json({ error: "patientId is required" });
+    if (!followUpAt) return res.status(400).json({ error: "followUpAt is required" });
+    if (!reason) return res.status(400).json({ error: "reason is required" });
+
+    const [patient, doctor] = await Promise.all([
+      findUserByRole(patientId, "patient", "patient"),
+      findUserByRole(doctorId, "doctor", "doctor")
+    ]);
+
+    const patientProfile = await PatientProfile.findOne({ user: patient._id, assignedDoctors: doctor._id }).lean();
+    if (!patientProfile?._id) {
+      return res.status(403).json({ error: "This patient is outside your assignment scope" });
+    }
+
+    const title = `Follow up with ${patient.name}`;
+    const task = await CrmTask.create({
+      patient: patient._id,
+      assignedDoctor: doctor._id,
+      title,
+      description: reason,
+      category: "appointment_confirmation",
+      status: "pending",
+      priority,
+      dueAt: followUpAt,
+      followUpAt,
+      escalationRequired: false,
+      callOutcome: "pending"
+    });
+
+    await syncPatientFollowUpDueAt(patient._id);
+
+    const populatedTask = await CrmTask.findById(task._id)
+      .populate("patient", "name email phone status userNumber")
+      .populate("assignedDoctor", "name email phone status userNumber")
+      .populate("assignedNurse", "name email phone status userNumber")
+      .lean();
+
+    return res.status(201).json({
+      message: "Follow up scheduled successfully.",
+      task: buildFollowUpTaskResponse(populatedTask)
+    });
+  } catch (err) {
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    const message = err instanceof Error ? err.message : "Failed to schedule follow up";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function updateDoctorAppointmentController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id?.toString?.() || "";
+    const appointmentId = normalizeString(req?.params?.appointmentId);
+    const outcome = normalizeString(req?.body?.outcome);
+    const reason = normalizeString(req?.body?.reason);
+    const status = normalizeString(req?.body?.status).toLowerCase();
+    const scheduledAt = Object.prototype.hasOwnProperty.call(req?.body || {}, "scheduledAt")
+      ? normalizeDate(req?.body?.scheduledAt, "scheduledAt")
+      : null;
+    const appointmentType = Object.prototype.hasOwnProperty.call(req?.body || {}, "appointmentType")
+      ? normalizeString(req?.body?.appointmentType).toLowerCase()
+      : "";
+    const preparationInstructions = Object.prototype.hasOwnProperty.call(req?.body || {}, "preparationInstructions")
+      ? normalizeString(req?.body?.preparationInstructions)
+      : "";
+    const noteMessage = normalizeString(req?.body?.note);
+    const actionType = normalizeString(req?.body?.actionType).toLowerCase();
+    const hasStatus = Object.prototype.hasOwnProperty.call(req?.body || {}, "status");
+    const hasOutcome = Object.prototype.hasOwnProperty.call(req?.body || {}, "outcome");
+    const hasReason = Object.prototype.hasOwnProperty.call(req?.body || {}, "reason");
+    const hasScheduledAt = Object.prototype.hasOwnProperty.call(req?.body || {}, "scheduledAt");
+    const hasAppointmentType = Object.prototype.hasOwnProperty.call(req?.body || {}, "appointmentType");
+    const hasPreparationInstructions = Object.prototype.hasOwnProperty.call(req?.body || {}, "preparationInstructions");
+    const hasDocumentsRequired = Object.prototype.hasOwnProperty.call(req?.body || {}, "documentsRequired");
+    const hasReportsRequired = Object.prototype.hasOwnProperty.call(req?.body || {}, "reportsRequired");
+    const hasPreVisitUpdateRequired = Object.prototype.hasOwnProperty.call(req?.body || {}, "preVisitUpdateRequired");
+    const hasNote = Object.prototype.hasOwnProperty.call(req?.body || {}, "note");
+    const hasActionType = Object.prototype.hasOwnProperty.call(req?.body || {}, "actionType");
+    const nextDocumentsRequired = hasDocumentsRequired ? normalizeBoolean(req?.body?.documentsRequired) : false;
+    const nextReportsRequired = hasReportsRequired ? normalizeBoolean(req?.body?.reportsRequired) : false;
+    const nextPreVisitUpdateRequired = hasPreVisitUpdateRequired ? normalizeBoolean(req?.body?.preVisitUpdateRequired) : false;
+
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+    if (!/^[a-f\d]{24}$/i.test(appointmentId)) {
+      return res.status(400).json({ error: "Invalid appointmentId" });
+    }
+
+    const appointment = await Appointment.findById(appointmentId)
+      .populate("patient", "name email phone status userNumber")
+      .populate("doctor", "name email phone status userNumber")
+      .populate("scheduledBy", "name email phone status userNumber");
+
+    if (!appointment?._id) return res.status(404).json({ error: "Appointment not found" });
+
+    if (appointment.doctor?._id?.toString?.() !== doctorId) {
+      return res.status(403).json({ error: "You can only update appointments assigned to you" });
+    }
+
+    const patientProfile = await PatientProfile.findOne({
+      user: appointment.patient?._id,
+      assignedDoctors: doctorId
+    }).lean();
+    if (!patientProfile?._id) {
+      return res.status(403).json({ error: "This patient is outside your assignment scope" });
+    }
+
+    if (
+      !hasStatus && !hasOutcome && !hasReason && !hasScheduledAt && !hasAppointmentType &&
+      !hasPreparationInstructions && !hasDocumentsRequired && !hasReportsRequired &&
+      !hasPreVisitUpdateRequired && !hasNote && !hasActionType
+    ) {
+      return res.status(400).json({ error: "At least one field is required" });
+    }
+
+    if (hasStatus) {
+      if (!APPOINTMENT_STATUS_ENUM.includes(status)) return res.status(400).json({ error: "Invalid status" });
+      appointment.status = status;
+      if (status === "checked_in") appointment.checkedInAt = new Date();
+      if (status === "completed") appointment.completedAt = new Date();
+      if (status === "cancelled") appointment.cancelledAt = new Date();
+      if (status === "no_show") appointment.noShowAt = new Date();
+      if (["scheduled", "pending", "confirmed"].includes(status)) {
+        appointment.checkedInAt = null;
+        appointment.completedAt = null;
+        appointment.cancelledAt = null;
+        appointment.noShowAt = null;
+      }
+      addAppointmentNote(appointment, {
+        type: "status_change",
+        channel: "desk",
+        message: `Appointment status changed to ${status}.`,
+        createdBy: doctorId,
+        metadata: { status }
+      });
+    }
+
+    if (hasOutcome) appointment.outcome = outcome;
+    if (hasReason) {
+      if (!reason) return res.status(400).json({ error: "reason is required" });
+      appointment.reason = reason;
+    }
+    if (hasAppointmentType) {
+      if (!APPOINTMENT_TYPE_ENUM.includes(appointmentType)) return res.status(400).json({ error: "Invalid appointmentType" });
+      appointment.appointmentType = appointmentType;
+    }
+    if (hasPreparationInstructions) appointment.preparationInstructions = preparationInstructions;
+    if (hasDocumentsRequired) appointment.documentsRequired = nextDocumentsRequired;
+    if (hasReportsRequired) appointment.reportsRequired = nextReportsRequired;
+    if (hasPreVisitUpdateRequired) appointment.preVisitUpdateRequired = nextPreVisitUpdateRequired;
+
+    if (hasScheduledAt) {
+      if (!scheduledAt) return res.status(400).json({ error: "scheduledAt is required" });
+      const availability = await ensureDoctorAvailability({
+        doctor: appointment.doctor,
+        scheduledAt,
+        excludeAppointmentId: appointment._id.toString()
+      });
+      appointment.scheduledAt = scheduledAt;
+      appointment.endsAt = availability.endsAt;
+      appointment.slotMinutes = availability.slotMinutes;
+      addAppointmentNote(appointment, {
+        type: "reschedule",
+        channel: "desk",
+        message: `Appointment rescheduled to ${formatDateTimeLabel(scheduledAt)}.`,
+        createdBy: doctorId,
+        metadata: { scheduledAt }
+      });
+    }
+
+    if (hasNote && noteMessage) {
+      addAppointmentNote(appointment, { type: "note", channel: "desk", message: noteMessage, createdBy: doctorId });
+    }
+
+    const warnings = [];
+    if (hasActionType) {
+      if (!EMAIL_ACTIONS.includes(actionType)) return res.status(400).json({ error: "Invalid actionType" });
+
+      if (!appointment.patient?.email) {
+        warnings.push("Patient email is not available for this action.");
+      } else {
+        try {
+          const emailContent = buildAppointmentEmailContent({ actionType, appointment, managedDoctor: appointment.doctor });
+          await sendAdminCustomEmail({
+            toEmail: appointment.patient.email,
+            name: appointment.patient.name,
+            role: "patient",
+            subject: emailContent.subject,
+            message: emailContent.message,
+            summary: emailContent.summary,
+            userNumber: appointment.patient.userNumber
+          });
+          if (actionType === "confirmation") {
+            appointment.confirmationSentAt = new Date();
+            if (appointment.status === "pending" || appointment.status === "scheduled") {
+              appointment.status = "confirmed";
+            }
+          } else {
+            appointment.lastReminderAt = new Date();
+          }
+          appointment.lastReminderType = actionType;
+          addAppointmentNote(appointment, {
+            type: actionType === "instructions" ? "instruction" : actionType,
+            channel: "email",
+            message: `${formatAppointmentTypeLabel(actionType)} email sent to patient.`,
+            createdBy: doctorId,
+            metadata: { actionType }
+          });
+        } catch (emailError) {
+          warnings.push(emailError instanceof Error ? emailError.message : "Failed to send email");
+        }
+      }
+    }
+
+    await appointment.save();
+    await syncPatientNextAppointment(appointment.patient?._id);
+
+    const updatedAppointment = await Appointment.findById(appointment._id)
+      .populate("patient", "name email phone status userNumber")
+      .populate("doctor", "name email phone status userNumber")
+      .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    return res.json({
+      message: warnings.length === 0 ? "Appointment updated successfully." : "Appointment updated with warnings.",
+      warnings,
+      appointment: buildAppointmentResponse(updatedAppointment)
+    });
+  } catch (err) {
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    const message = err instanceof Error ? err.message : "Failed to update appointment";
+    return res.status(statusCode).json({ error: message });
+  }
+}
+
+export async function listDoctorAppointmentsController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
+
+    const doctorId = req?.user?._id?.toString?.() || "";
+    if (!doctorId) return res.status(401).json({ error: "Unauthorized" });
+
+    const search = normalizeString(req?.query?.search).toLowerCase();
+    const selectedPatientId = normalizeString(req?.query?.patientId);
+    const selectedStatus = normalizeString(req?.query?.status).toLowerCase();
+    const selectedType = normalizeString(req?.query?.appointmentType).toLowerCase();
+    const viewMode = normalizeString(req?.query?.view).toLowerCase() === "weekly" ? "weekly" : "daily";
+    const referenceDate = normalizeString(req?.query?.date) || formatDateKeyFromDate(new Date());
+
+    if (selectedStatus && !APPOINTMENT_STATUS_ENUM.includes(selectedStatus)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+    if (selectedType && !APPOINTMENT_TYPE_ENUM.includes(selectedType)) {
+      return res.status(400).json({ error: "Invalid appointmentType" });
+    }
+
+    const doctor = await findUserByRole(doctorId, "doctor", "doctor");
+
+    const patientProfiles = await PatientProfile.find({ assignedDoctors: doctorId })
+      .populate("user", "name email phone status userNumber")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const scopedPatients = patientProfiles.map((profile) => buildUserOption(profile.user)).filter(Boolean);
+    const scopedPatientIds = scopedPatients.map((patient) => patient.id);
+
+    if (selectedPatientId && !scopedPatientIds.includes(selectedPatientId)) {
+      return res.status(403).json({ error: "This patient is outside your assignment scope" });
+    }
+
+    const viewWindow = buildViewWindow(parseDateKey(referenceDate, "date").date, viewMode);
+
+    const appointments = await Appointment.find({
+      doctor: doctorId,
+      patient: { $in: scopedPatientIds },
+      scheduledAt: { $gte: viewWindow.startDate, $lt: viewWindow.endDate },
+      ...(selectedPatientId ? { patient: selectedPatientId } : {}),
+      ...(selectedStatus ? { status: selectedStatus } : {}),
+      ...(selectedType ? { appointmentType: selectedType } : {})
+    })
+      .sort({ scheduledAt: 1, createdAt: 1 })
+      .populate("patient", "name email phone status userNumber")
+      .populate("doctor", "name email phone status userNumber")
+      .populate("scheduledBy", "name email phone status userNumber")
+      .populate("notes.createdBy", "name email phone status userNumber")
+      .lean();
+
+    const filteredAppointments = appointments.filter((appointment) => {
+      if (!search) return true;
+      const haystack = [
+        appointment?.patient?.name,
+        appointment?.patient?.email,
+        appointment?.patient?.phone,
+        appointment?.doctor?.name,
+        appointment?.reason,
+        appointment?.outcome,
+        appointment?.preparationInstructions
+      ].filter(Boolean).join(" ").toLowerCase();
+      return haystack.includes(search);
+    });
+
+    const appointmentResponses = filteredAppointments.map((a) => buildAppointmentResponse(a)).filter(Boolean);
+
+    return res.json({
+      appointments: appointmentResponses,
+      summary: buildUpcomingAppointmentsSummary(appointmentResponses),
+      filters: {
+        date: referenceDate,
+        view: viewWindow.view,
+        rangeStart: viewWindow.startDate,
+        rangeEnd: new Date(viewWindow.endDate.getTime() - 1)
+      },
+      options: {
+        patients: scopedPatients,
+        doctors: [buildUserOption(doctor)].filter(Boolean),
+        statuses: APPOINTMENT_STATUS_ENUM.map((value) => ({ value, label: formatAppointmentStatusLabel(value) })),
+        appointmentTypes: APPOINTMENT_TYPE_ENUM.map((value) => ({ value, label: formatAppointmentTypeLabel(value) }))
+      },
+      context: {
+        doctor: buildUserOption(doctor)
+      }
+    });
+  } catch (err) {
+    const statusCode = typeof err?.statusCode === "number" ? err.statusCode : 500;
+    const message = err instanceof Error ? err.message : "Failed to load doctor appointments";
     return res.status(statusCode).json({ error: message });
   }
 }

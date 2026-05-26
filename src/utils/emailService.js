@@ -1,5 +1,6 @@
 import nodemailer from "nodemailer";
 import { buildAdminCustomEmailTemplate } from "../EmailTamplates/adminMessageTemplates.js";
+import { buildAssignmentEmailTemplate } from "../EmailTamplates/assignmentTemplates.js";
 import { buildAccountUpdateOtpTemplate, buildLoginOtpTemplate } from "../EmailTamplates/otpTemplates.js";
 import { buildUserActiveTemplate, buildUserBlockedTemplate, buildUserOnboardingTemplate } from "../EmailTamplates/userNotificationTemplates.js";
 
@@ -74,6 +75,11 @@ export async function sendUserBlockedEmail({ toEmail, name, role, phone, userNum
 
 export async function sendUserActiveEmail({ toEmail, name, role, phone, userNumber }) {
   const template = buildUserActiveTemplate({ name, role, email: toEmail, phone, userNumber });
+  await sendTemplateEmail({ toEmail, template });
+}
+
+export async function sendAssignmentEmail({ toEmail, recipientName, doctorName, title, description, priority, dueAt }) {
+  const template = buildAssignmentEmailTemplate({ recipientName, doctorName, title, description, priority, dueAt });
   await sendTemplateEmail({ toEmail, template });
 }
 
