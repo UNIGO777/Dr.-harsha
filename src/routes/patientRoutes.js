@@ -30,7 +30,8 @@ import {
   listPatientDocumentsController,
   uploadDocumentController,
   deleteDocumentController,
-  downloadDocumentController
+  downloadDocumentController,
+  listDocumentsByReportController
 } from "../Controllers/patientPanelDocumentController.js";
 import { getPatientTimelineController } from "../Controllers/patientPanelTimelineController.js";
 import {
@@ -108,6 +109,7 @@ patientRouter.get("/notifications/unread-count", ...patientAuth, getUnreadCountC
 
 // ── Documents ──
 patientRouter.get("/documents", ...patientAuth, listPatientDocumentsController);
+patientRouter.get("/documents/by-report", ...patientAuth, listDocumentsByReportController);
 patientRouter.post("/documents/upload", ...patientAuth, patientDocUpload.array("files", 5), uploadDocumentController);
 patientRouter.delete("/documents/:id", ...patientAuth, deleteDocumentController);
 patientRouter.get("/documents/:id/download", ...patientAuth, downloadDocumentController);

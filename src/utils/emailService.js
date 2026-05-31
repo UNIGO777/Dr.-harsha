@@ -97,3 +97,14 @@ export async function sendAdminCustomEmail({ toEmail, name, role, subject, messa
   template.attachments = safeAttachments;
   await sendTemplateEmail({ toEmail, template });
 }
+
+export async function sendPlainNotificationEmail({ toEmail, subject, body }) {
+  const transporter = getTransporter();
+  await transporter.sendMail({
+    from: getFromAddress(),
+    to: toEmail,
+    subject,
+    text: body,
+    html: `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:20px;"><h2 style="color:#1a56db;">${subject}</h2><p style="color:#374151;white-space:pre-wrap;">${body}</p><hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;"/><p style="font-size:12px;color:#9ca3af;">This is an automated notification from Dr. Harsha Health Portal.</p></div>`
+  });
+}

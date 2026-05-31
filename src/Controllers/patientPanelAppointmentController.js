@@ -1,7 +1,9 @@
 import { Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
+import { User } from "../Models/User.js";
 import { Notification } from "../Models/Notification.js";
+import { sendPlainNotificationEmail } from "../utils/emailService.js";
 
 function buildAppointmentResponse(apt) {
   if (!apt?._id) return null;
@@ -112,6 +114,20 @@ export async function requestAppointmentController(req, res) {
         metadata: { patientId, taskId: task._id.toString() },
         createdBy: patientId
       });
+
+      // Send email notification to nurse
+      try {
+        const nurseUser = await User.findById(assignedNurse, "email name").lean();
+        if (nurseUser?.email) {
+          await sendPlainNotificationEmail({
+            toEmail: nurseUser.email,
+            subject: "New Appointment Request from Patient",
+            body: `Hello ${nurseUser.name || "Nurse"},\n\nPatient "${req.user.name || "Unknown"}" has requested a new appointment.\n\nReason: ${reason.trim()}${preferredDate ? `\nPreferred Date: ${preferredDate}` : ""}${appointmentType ? `\nType: ${appointmentType}` : ""}\n\nPlease log in to the nurse panel to review and schedule this appointment.`
+          });
+        }
+      } catch (emailErr) {
+        console.warn("Failed to send appointment request email:", emailErr?.message);
+      }
     }
 
     return res.status(201).json({

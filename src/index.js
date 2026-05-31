@@ -9,6 +9,7 @@ import { gptRouter } from "./routes/gpt.js";
 import { authRouter } from "./routes/authRoutes.js";
 import { userRouter } from "./routes/userRoutes.js";
 import { patientRouter } from "./routes/patientRoutes.js";
+import { nurseRouter } from "./routes/nurseRoutes.js";
 import { connectDb } from "./utils/connectDb.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -123,6 +124,7 @@ app.use("/api", gptRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/users", userRouter);
 app.use("/api/patient", patientRouter);
+app.use("/api/nurse", nurseRouter);
 
 app.use((err, req, res, next) => {
   const requestId = res.getHeader("x-request-id") || "unknown";
@@ -155,9 +157,14 @@ const port = Number(process.env.PORT) || 3000;
 
 async function start() {
   try {
-    const { connected } = await connectDb();
-    app.locals.dbReady = !!connected;
-    if (!connected) console.warn("MongoDB not connected. Set MONGODB_URI or MONGO_URI to enable auth APIs.");
+    console.log("[Startup] Initiating MongoDB connection...");
+    const dbResult = await connectDb();
+    app.locals.dbReady = !!dbResult.connected;
+    if (dbResult.connected) {
+      console.log(`[Startup] MongoDB: CONNECTED${dbResult.fallbackUsed ? ` (via fallback DNS: ${dbResult.dnsServer})` : " (direct)"}`);
+    } else {
+      console.warn(`[Startup] MongoDB: NOT CONNECTED — ${dbResult.reason || "unknown reason"}. Set MONGODB_URI or MONGO_URI to enable auth APIs.`);
+    }
 
     const server = app.listen(port, "0.0.0.0", () => {
       console.log(`API listening on http://localhost:${port}`);

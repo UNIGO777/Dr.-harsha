@@ -3,6 +3,7 @@ import fs from "node:fs";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PatientDocument, PATIENT_DOCUMENT_CATEGORIES } from "../Models/PatientDocument.js";
+import { PatientReport } from "../Models/PatientReport.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
 import { Notification } from "../Models/Notification.js";
 
@@ -202,5 +203,49 @@ export async function downloadDocumentController(req, res) {
   } catch (err) {
     console.error("downloadDocumentController error:", err);
     return res.status(500).json({ error: "Failed to download document" });
+  }
+}
+
+/**
+ * GET /api/patient/documents/by-report
+ * Returns all documents grouped by the report they were uploaded in (folder structure)
+ */
+export async function listDocumentsByReportController(req, res) {
+  try {
+    if (!req?.app?.locals?.dbReady) {
+      return res.status(500).json({ error: "Database not configured" });
+    }
+
+    const patientId = req?.user?._id?.toString?.() || "";
+    if (!patientId) return res.status(401).json({ error: "Unauthorized" });
+
+    // Get all reports with their uploaded documents
+    const reports = await PatientReport.find(
+      { patient: patientId, "uploadedDocuments.0": { $exists: true } },
+      { reportNumber: 1, createdAt: 1, uploadedDocuments: 1, assignedDoctor: 1 }
+    )
+      .populate("assignedDoctor", "name")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const folders = reports.map((report) => ({
+      reportId: report._id.toString(),
+      reportNumber: report.reportNumber,
+      reportDate: report.createdAt,
+      doctor: report.assignedDoctor ? { id: report.assignedDoctor._id.toString(), name: report.assignedDoctor.name } : null,
+      documents: (report.uploadedDocuments || []).map((doc) => ({
+        id: doc._id.toString(),
+        stepId: doc.stepId,
+        originalName: doc.originalName,
+        mimeType: doc.mimeType,
+        size: doc.size,
+        uploadedAt: doc.uploadedAt,
+      })),
+    }));
+
+    return res.json({ folders });
+  } catch (err) {
+    console.error("listDocumentsByReportController error:", err);
+    return res.status(500).json({ error: "Failed to load documents" });
   }
 }
