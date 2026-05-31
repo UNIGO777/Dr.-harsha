@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { gptRouter } from "./routes/gpt.js";
 import { authRouter } from "./routes/authRoutes.js";
 import { userRouter } from "./routes/userRoutes.js";
+import { patientRouter } from "./routes/patientRoutes.js";
 import { connectDb } from "./utils/connectDb.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -121,6 +122,7 @@ app.get("/health", (req, res) => {
 app.use("/api", gptRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/users", userRouter);
+app.use("/api/patient", patientRouter);
 
 app.use((err, req, res, next) => {
   const requestId = res.getHeader("x-request-id") || "unknown";

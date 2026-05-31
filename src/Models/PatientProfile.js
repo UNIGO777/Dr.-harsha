@@ -67,6 +67,25 @@ const patientProfileSchema = new mongoose.Schema(
       enum: PATIENT_TAG_OPTIONS,
       default: []
     },
+    emergencyContact: {
+      name: { type: String, trim: true, default: "" },
+      relation: { type: String, trim: true, default: "" },
+      phone: { type: String, trim: true, default: "" }
+    },
+    bloodGroup: {
+      type: String,
+      enum: ["", "A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"],
+      default: ""
+    },
+    allergies: { type: [String], default: [] },
+    existingConditions: { type: [String], default: [] },
+    notificationPreferences: {
+      emailNotifications: { type: Boolean, default: true },
+      smsNotifications: { type: Boolean, default: false },
+      appointmentReminders: { type: Boolean, default: true },
+      reportAlerts: { type: Boolean, default: true },
+      medicationReminders: { type: Boolean, default: true }
+    },
     lastInteractionAt: { type: Date, default: null },
     nextAppointmentAt: { type: Date, default: null },
     followUpDueAt: { type: Date, default: null },
