@@ -263,6 +263,8 @@ function buildPatientMedicationResponse(medication) {
     timeSlots: Array.isArray(medication.timeSlots) ? medication.timeSlots : [],
     foodTiming: medication.foodTiming || "",
     additionalInfo: medication.additionalInfo || "",
+    startDate: medication.startDate || null,
+    endDate: medication.endDate || null,
     createdAt: medication.createdAt || null,
     updatedAt: medication.updatedAt || null
   };
@@ -1408,6 +1410,9 @@ export async function addPatientMedicationController(req, res) {
     const timeSlots = parseMedicationTimeSlots(req?.body?.timeSlots);
     const { patientProfile, doctorId, patientId } = await resolvePatientMedicationAccess({ actor: req });
 
+    const startDate = req?.body?.startDate ? new Date(req.body.startDate) : null;
+    const endDate = req?.body?.endDate ? new Date(req.body.endDate) : null;
+
     patientProfile.medications.push({
       medicineName,
       patient: patientId,
@@ -1417,7 +1422,9 @@ export async function addPatientMedicationController(req, res) {
       durationUnit,
       timeSlots,
       foodTiming,
-      additionalInfo
+      additionalInfo,
+      startDate: startDate && !isNaN(startDate.getTime()) ? startDate : null,
+      endDate: endDate && !isNaN(endDate.getTime()) ? endDate : null
     });
     patientProfile.lastInteractionAt = new Date();
     await patientProfile.save();

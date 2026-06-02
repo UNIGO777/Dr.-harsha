@@ -5370,7 +5370,12 @@ const upload = multer({
   }
 });
 
+import { authMiddleware } from "../middlewares/authMiddleware.js";
+
 export const gptRouter = express.Router();
+
+// Require authentication for all GPT routes
+gptRouter.use(authMiddleware);
 
 gptRouter.post(
   "/gpt",

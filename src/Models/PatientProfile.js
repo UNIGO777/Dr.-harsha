@@ -38,7 +38,9 @@ const patientMedicationSchema = new mongoose.Schema(
       enum: PATIENT_MEDICATION_FOOD_TIMING_OPTIONS,
       required: true
     },
-    additionalInfo: { type: String, trim: true, default: "" }
+    additionalInfo: { type: String, trim: true, default: "" },
+    startDate: { type: Date, default: null },
+    endDate: { type: Date, default: null }
   },
   { _id: true, timestamps: true }
 );

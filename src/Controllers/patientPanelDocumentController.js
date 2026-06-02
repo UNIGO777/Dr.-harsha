@@ -192,7 +192,11 @@ export async function downloadDocumentController(req, res) {
     const doc = await PatientDocument.findOne({ _id: id, patient: patientId }).lean();
     if (!doc) return res.status(404).json({ error: "Document not found" });
 
+    const uploadsDir = path.resolve(__dirname, "..", "..", "uploads");
     const filePath = path.resolve(__dirname, "..", "..", doc.relativePath);
+    if (!filePath.startsWith(uploadsDir)) {
+      return res.status(403).json({ error: "Access denied" });
+    }
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: "File not found on server" });
     }

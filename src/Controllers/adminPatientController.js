@@ -62,6 +62,8 @@ function buildMedicationResponse(medication) {
     timeSlots: Array.isArray(medication.timeSlots) ? medication.timeSlots : [],
     foodTiming: medication.foodTiming || "",
     additionalInfo: medication.additionalInfo || "",
+    startDate: medication.startDate || null,
+    endDate: medication.endDate || null,
     createdAt: medication.createdAt || null,
     updatedAt: medication.updatedAt || null
   };
@@ -326,6 +328,9 @@ export async function addAdminPatientMedicationController(req, res) {
     }
     if (!resolvedDoctorId) return res.status(400).json({ error: "No doctor assigned to this patient. Please provide doctorId." });
 
+    const startDate = req?.body?.startDate ? new Date(req.body.startDate) : null;
+    const endDate = req?.body?.endDate ? new Date(req.body.endDate) : null;
+
     profile.medications.push({
       medicineName,
       patient: patientId,
@@ -335,7 +340,9 @@ export async function addAdminPatientMedicationController(req, res) {
       durationUnit,
       timeSlots: normalizedTimeSlots,
       foodTiming,
-      additionalInfo
+      additionalInfo,
+      startDate: startDate && !isNaN(startDate.getTime()) ? startDate : null,
+      endDate: endDate && !isNaN(endDate.getTime()) ? endDate : null
     });
     profile.lastInteractionAt = new Date();
     await profile.save();
@@ -407,6 +414,14 @@ export async function updateAdminPatientMedicationController(req, res) {
     }
     if (body.doctorId !== undefined) {
       medication.doctor = normalizeString(body.doctorId);
+    }
+    if (body.startDate !== undefined) {
+      const sd = body.startDate ? new Date(body.startDate) : null;
+      medication.startDate = sd && !isNaN(sd.getTime()) ? sd : null;
+    }
+    if (body.endDate !== undefined) {
+      const ed = body.endDate ? new Date(body.endDate) : null;
+      medication.endDate = ed && !isNaN(ed.getTime()) ? ed : null;
     }
 
     await profile.save();

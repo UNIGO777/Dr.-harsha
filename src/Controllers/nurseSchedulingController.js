@@ -1612,9 +1612,17 @@ export async function scheduleDoctorAppointmentController(req, res) {
       findUserByRole(doctorId, "doctor", "doctor")
     ]);
 
-    const patientProfile = await PatientProfile.findOne({ user: patient._id, assignedDoctors: doctor._id }).lean();
+    let patientProfile = await PatientProfile.findOne({ user: patient._id, assignedDoctors: doctor._id }).lean();
     if (!patientProfile?._id) {
-      return res.status(403).json({ error: "This patient is outside your assignment scope" });
+      // Auto-assign doctor to patient if profile exists but doctor is not assigned
+      const existingProfile = await PatientProfile.findOne({ user: patient._id });
+      if (existingProfile?._id) {
+        existingProfile.assignedDoctors.addToSet(doctor._id);
+        await existingProfile.save();
+        patientProfile = existingProfile.toObject();
+      } else {
+        return res.status(403).json({ error: "Patient profile not found. Please ensure the patient is properly set up." });
+      }
     }
 
     const availability = await ensureDoctorAvailability({ doctor, scheduledAt });
@@ -1722,9 +1730,17 @@ export async function scheduleDoctorFollowUpController(req, res) {
       findUserByRole(doctorId, "doctor", "doctor")
     ]);
 
-    const patientProfile = await PatientProfile.findOne({ user: patient._id, assignedDoctors: doctor._id }).lean();
+    let patientProfile = await PatientProfile.findOne({ user: patient._id, assignedDoctors: doctor._id }).lean();
     if (!patientProfile?._id) {
-      return res.status(403).json({ error: "This patient is outside your assignment scope" });
+      // Auto-assign doctor to patient if profile exists but doctor is not assigned
+      const existingProfile = await PatientProfile.findOne({ user: patient._id });
+      if (existingProfile?._id) {
+        existingProfile.assignedDoctors.addToSet(doctor._id);
+        await existingProfile.save();
+        patientProfile = existingProfile.toObject();
+      } else {
+        return res.status(403).json({ error: "Patient profile not found. Please ensure the patient is properly set up." });
+      }
     }
 
     const title = `Follow up with ${patient.name}`;
