@@ -1,126 +1,92 @@
-const ROLE_COPY = {
-  super_admin: {
-    badge: "Super Admin Access",
-    heading: "Super admin login verification",
-    intro: "You are signing in to the hospital management command center.",
-    accent: "#7c3aed"
-  },
-  doctor: {
-    badge: "Doctor Access",
-    heading: "Doctor portal login verification",
-    intro: "Use this OTP to access your doctor workspace securely.",
-    accent: "#0f766e"
-  },
-  nurse: {
-    badge: "Nurse Access",
-    heading: "Nurse portal login verification",
-    intro: "Use this OTP to continue into the nursing operations panel.",
-    accent: "#2563eb"
-  },
-  patient: {
-    badge: "Patient Access",
-    heading: "Patient portal login verification",
-    intro: "Use this OTP to access your patient dashboard securely.",
-    accent: "#ea580c"
-  }
-};
+import {
+  getRoleTheme, toDisplayName, wrapEmail,
+  buildLightHero, buildHeroArt, buildGreeting,
+  buildOtpSection, buildCenteredText
+} from './emailLayout.js';
 
-function getRoleContent(role) {
-  if (typeof role !== "string") return ROLE_COPY.patient;
-  return ROLE_COPY[role] || ROLE_COPY.patient;
-}
-
-function buildOtpTemplate({ name, otp, role, expiryMinutes, heading, intro, actionLabel, badgeSuffix }) {
-  const profile = getRoleContent(role);
-  const displayName = typeof name === "string" && name.trim() ? name.trim() : "User";
-  const safeOtp = String(otp || "").trim();
+function buildOtpTemplate({
+  name, otp, role, expiryMinutes,
+  heroTitle, heroCheck, heroDesc, artSymbol,
+  greetingMsg, codeLabel, ignoreMsg, subjectLine
+}) {
+  const theme = getRoleTheme(role);
+  const displayName = toDisplayName(name);
+  const safeOtp = String(otp || '').trim();
   const minutes = Number.isFinite(Number(expiryMinutes)) ? Number(expiryMinutes) : 10;
-  const safeHeading = typeof heading === "string" && heading.trim() ? heading.trim() : profile.heading;
-  const safeIntro = typeof intro === "string" && intro.trim() ? intro.trim() : profile.intro;
-  const safeActionLabel = typeof actionLabel === "string" && actionLabel.trim() ? actionLabel.trim() : "account verification";
-  const safeBadgeSuffix = typeof badgeSuffix === "string" && badgeSuffix.trim() ? badgeSuffix.trim() : "OTP";
 
   const text = [
     `Hello ${displayName},`,
-    safeIntro,
+    greetingMsg,
     `Your one-time password is ${safeOtp}.`,
     `This code expires in ${minutes} minutes.`,
-    `Use this code to complete your ${safeActionLabel}.`,
-    "If you did not request this action, please contact your hospital administrator immediately."
-  ].join("\n");
+    ignoreMsg,
+    '',
+    '— Dr Harsha Healthcare'
+  ].join('\n');
 
-  const html = `
-    <div style="margin:0;padding:24px;background:#f8fafc;font-family:Arial,sans-serif;color:#0f172a">
-      <div style="max-width:640px;margin:0 auto;background:#ffffff;border:1px solid #e2e8f0;border-radius:24px;overflow:hidden">
-        <div style="padding:28px 32px;background:${profile.accent}">
-          <div style="display:inline-block;padding:8px 14px;border-radius:999px;background:rgba(255,255,255,0.18);font-size:12px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#ffffff">
-            ${profile.badge} · ${safeBadgeSuffix}
-          </div>
-          <h1 style="margin:18px 0 8px;font-size:28px;line-height:1.2;color:#ffffff">${safeHeading}</h1>
-          <p style="margin:0;font-size:15px;line-height:1.7;color:rgba(255,255,255,0.92)">${safeIntro}</p>
-        </div>
-        <div style="padding:32px">
-          <p style="margin:0 0 16px;font-size:16px;line-height:1.7;color:#0f172a">Hello ${displayName},</p>
-          <p style="margin:0 0 24px;font-size:15px;line-height:1.8;color:#334155">
-            Please use the one-time password below to complete your ${safeActionLabel}.
-          </p>
-          <div style="margin:0 0 24px;padding:22px 24px;border-radius:20px;background:#f8fafc;border:1px dashed ${profile.accent};text-align:center">
-            <div style="font-size:13px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#64748b">One-Time Password</div>
-            <div style="margin-top:12px;font-size:36px;font-weight:800;letter-spacing:8px;color:${profile.accent}">${safeOtp}</div>
-          </div>
-          <div style="padding:18px 20px;border-radius:18px;background:#eff6ff;color:#1e3a8a;font-size:14px;line-height:1.7">
-            This OTP will expire in <strong>${minutes} minutes</strong>.
-          </div>
-          <p style="margin:24px 0 0;font-size:14px;line-height:1.8;color:#475569">
-            If you did not request this action, please contact your hospital administrator immediately.
-          </p>
-        </div>
-      </div>
-    </div>
-  `;
+  const artHtml = buildHeroArt({ symbol: artSymbol, color: theme.primary, lightColor: theme.artBg });
 
-  return {
-    subject: `${profile.badge} ${safeBadgeSuffix}`,
-    text,
-    html
-  };
+  const bodyContent = [
+    buildLightHero({
+      theme,
+      badgeText: 'Account Security',
+      title: heroTitle,
+      checkText: heroCheck,
+      description: heroDesc,
+      artHtml
+    }),
+    buildGreeting(displayName, greetingMsg, theme),
+    buildOtpSection({ otp: safeOtp, label: codeLabel, minutes, theme }),
+    buildCenteredText(ignoreMsg, theme)
+  ].join('');
+
+  const html = wrapEmail({
+    bodyContent,
+    preheader: `Your code is ${safeOtp} (expires in ${minutes} minutes).`,
+    theme
+  });
+
+  return { subject: subjectLine, text, html };
 }
 
 export function buildLoginOtpTemplate({ name, otp, role, expiryMinutes }) {
   return buildOtpTemplate({
-    name,
-    otp,
-    role,
-    expiryMinutes,
-    heading: getRoleContent(role).heading,
-    intro: getRoleContent(role).intro,
-    actionLabel: "secure login",
-    badgeSuffix: "OTP for login"
+    name, otp, role, expiryMinutes,
+    heroTitle: 'Login Verification',
+    heroCheck: "Verify it's really you",
+    heroDesc: 'Use the one-time code below to finish signing in securely.',
+    artSymbol: '&#10003;',
+    greetingMsg: 'We received a request to sign in to your Dr Harsha Healthcare account. Enter the verification code below to continue.',
+    codeLabel: 'YOUR LOGIN CODE',
+    ignoreMsg: "Didn't try to sign in? You can safely ignore this email &mdash; your account remains secure.",
+    subjectLine: `${getRoleTheme(role).badge} &middot; Login OTP`
   });
 }
 
 export function buildAccountUpdateOtpTemplate({ name, otp, role, expiryMinutes, actionType }) {
-  if (actionType === "email") {
+  if (actionType === 'email') {
     return buildOtpTemplate({
-      name,
-      otp,
-      role,
-      expiryMinutes,
-      heading: "Verify your email change request",
-      intro: "Use this OTP to confirm that you want to update the email address for your account.",
-      actionLabel: "email update request",
-      badgeSuffix: "OTP for email update"
+      name, otp, role, expiryMinutes,
+      heroTitle: 'Confirm Your New Email',
+      heroCheck: 'Verify your email change',
+      heroDesc: 'Enter the code below to confirm and link your new email address.',
+      artSymbol: '@',
+      greetingMsg: 'You requested to update the email address on your Dr Harsha Healthcare account. Enter the code below to confirm this change.',
+      codeLabel: 'EMAIL VERIFICATION CODE',
+      ignoreMsg: "Didn't request this change? Please contact support immediately to secure your account.",
+      subjectLine: `${getRoleTheme(role).badge} &middot; Email Change OTP`
     });
   }
 
   return buildOtpTemplate({
-    name,
-    otp,
-    role,
-    expiryMinutes,
-    heading: "Verify your password change request",
-    intro: "Use this OTP to confirm that you want to change the password for your account.",
-    actionLabel: "password change request",
-    badgeSuffix: "OTP for password update"
+    name, otp, role, expiryMinutes,
+    heroTitle: 'Password Change Verification',
+    heroCheck: 'Confirm your password change',
+    heroDesc: 'Use the one-time code below to confirm your password change request.',
+    artSymbol: '&#10045;',
+    greetingMsg: 'You requested to change the password on your Dr Harsha Healthcare account. Enter the code below to proceed.',
+    codeLabel: 'PASSWORD VERIFICATION CODE',
+    ignoreMsg: "Didn't request this change? Please contact support immediately to secure your account.",
+    subjectLine: `${getRoleTheme(role).badge} &middot; Password Change OTP`
   });
 }

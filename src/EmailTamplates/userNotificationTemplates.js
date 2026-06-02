@@ -1,155 +1,197 @@
-const ROLE_COPY = {
-  super_admin: {
-    badge: "Super Admin Access",
-    label: "Super Admin"
-  },
-  doctor: {
-    badge: "Doctor Access",
-    label: "Doctor"
-  },
-  nurse: {
-    badge: "Nurse Access",
-    label: "Nurse"
-  },
-  patient: {
-    badge: "Patient Access",
-    label: "Patient"
-  }
-};
+import {
+  getRoleTheme, toDisplayName, wrapEmail,
+  buildLightHero, buildAlertHero, buildSuccessHero,
+  buildHeroArt, buildGreeting, buildDetailTable,
+  buildCTAButton, buildSubtitle, buildCallout,
+  buildFeatureIcons, buildStepsList
+} from './emailLayout.js';
 
-function getRoleContent(role) {
-  if (typeof role !== "string") return ROLE_COPY.patient;
-  return ROLE_COPY[role] || ROLE_COPY.patient;
+function toSafe(value, fallback) {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
-function toDisplayName(name) {
-  return typeof name === "string" && name.trim() ? name.trim() : "User";
-}
-
-function buildRows({ email, phone, userNumber, roleLabel }) {
-  return [
-    { label: "Role", value: roleLabel },
-    { label: "User ID", value: userNumber ? String(userNumber) : "Not assigned" },
-    { label: "Email", value: email || "Not available" },
-    { label: "Phone", value: phone || "Not available" }
-  ];
-}
-
-function buildInfoRows(rows) {
-  return rows
-    .map(
-      ({ label, value }) => `
-        <div style="padding:14px 16px;border-radius:18px;background:#f8fafc;border:1px solid #e2e8f0;margin-bottom:12px">
-          <div style="font-size:11px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;color:#64748b">${label}</div>
-          <div style="margin-top:8px;font-size:15px;font-weight:700;color:#0f172a">${value}</div>
-        </div>
-      `
-    )
-    .join("");
-}
-
-function buildTemplate({ badge, heading, intro, greeting, message, rows, callout, footer }) {
-  const text = [
-    greeting,
-    intro,
-    message,
-    ...rows.map(({ label, value }) => `${label}: ${value}`),
-    callout,
-    footer
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const html = `
-    <div style="margin:0;font-family:Arial,sans-serif;color:#0f172a">
-      <div style="margin:0 auto;background:#ffffff;border:1px solid #e2e8f0; overflow:hidden">
-        <div style="padding:28px 32px;background:#111111">
-          <div style="display:inline-block;padding:8px 14px;border-radius:999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.16);font-size:12px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#ffffff">
-            ${badge}
-          </div>
-          <h1 style="margin:18px 0 8px;font-size:28px;line-height:1.2;color:#ffffff">${heading}</h1>
-          <p style="margin:0;font-size:15px;line-height:1.7;color:rgba(255,255,255,0.82)">${intro}</p>
-        </div>
-        <div style="padding:32px">
-          <p style="margin:0 0 16px;font-size:16px;line-height:1.7;color:#0f172a">${greeting}</p>
-          <p style="margin:0 0 24px;font-size:15px;line-height:1.8;color:#334155">${message}</p>
-          <div style="display:grid;gap:12px;margin:0 0 24px">
-            ${buildInfoRows(rows)}
-          </div>
-          <div style="padding:18px 20px;border-radius:18px;background:#111111;color:#ffffff;font-size:14px;line-height:1.7">
-            ${callout}
-          </div>
-          <p style="margin:24px 0 0;font-size:14px;line-height:1.8;color:#475569">${footer}</p>
-        </div>
-      </div>
-    </div>
-  `;
-
-  return { text, html };
-}
+/* ── User Onboarding / Welcome ────────────────────────────────── */
 
 export function buildUserOnboardingTemplate({ name, role, email, phone, userNumber }) {
-  const profile = getRoleContent(role);
+  const theme = getRoleTheme(role);
   const displayName = toDisplayName(name);
-  const rows = buildRows({ email, phone, userNumber, roleLabel: profile.label });
-  const template = buildTemplate({
-    badge: profile.badge,
-    heading: `You are completely onboarded as ${profile.label}`,
-    intro: `Your ${profile.label.toLowerCase()} account is now ready inside the Dr Harsha system.`,
-    greeting: `Hello ${displayName},`,
-    message: `You have been completely onboarded as ${profile.label.toLowerCase()} in our system. You can now use your registered email to access the portal. Your administrator will share any additional access instructions with you directly.`,
-    rows,
-    callout: `Please keep your user ID safe for future communication and verification.`,
-    footer: `If you were not expecting this account, please contact the hospital administrator immediately.`
+  const roleLabel = theme.label;
+
+  const text = [
+    `Hello ${displayName},`,
+    `Your ${roleLabel.toLowerCase()} account has been successfully created.`,
+    `You can now access a range of healthcare services with ease.`,
+    '',
+    `${roleLabel} Name: ${displayName}`,
+    `${roleLabel} ID: ${userNumber || 'Not assigned'}`,
+    `Email: ${email || 'Not available'}`,
+    `Phone: ${phone || 'Not available'}`,
+    `Account Status: Active`,
+    '',
+    'Please keep your user ID safe for future communication and verification.',
+    '',
+    '— Dr Harsha Healthcare'
+  ].join('\n');
+
+  const artHtml = buildHeroArt({ symbol: '&#10003;', color: theme.primary, lightColor: theme.artBg });
+
+  const features = [
+    { iconType: 'calendar', label: 'Book Appointments Online' },
+    { iconType: 'clipboard', label: 'Access Your Health Reports' },
+    { iconType: 'document', label: 'View Your Prescriptions' },
+    { iconType: 'heart', label: 'Track Your Health Journey' }
+  ];
+
+  const steps = [
+    'Complete your health profile',
+    'Upload previous medical reports',
+    'Schedule your first consultation',
+    'Start your journey to better health'
+  ];
+
+  const detailRows = [
+    { icon: 'person', label: `${roleLabel} Name`, value: displayName },
+    { icon: 'id', label: `${roleLabel} ID`, value: userNumber ? String(userNumber) : 'Not assigned' },
+    { icon: 'calendar', label: 'Registered On', value: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) },
+    { icon: 'status', label: 'Account Status', badge: { bg: '#DCFCE7', color: '#15803D', text: 'Active' } }
+  ];
+
+  const bodyContent = [
+    buildLightHero({
+      theme,
+      badgeText: 'Welcome to',
+      title: 'Dr Harsha Healthcare',
+      checkText: 'Your registration has been completed successfully.',
+      description: "We're delighted to have you as part of our healthcare community.",
+      artHtml
+    }),
+    buildFeatureIcons(features, theme),
+    buildGreeting(displayName, `Your ${roleLabel.toLowerCase()} account has been successfully created. You can now access a range of healthcare services with ease.`, theme),
+    buildDetailTable('YOUR ACCOUNT DETAILS', detailRows, theme),
+    buildCTAButton(`Access ${roleLabel} Portal`, theme.primary),
+    buildSubtitle('Use your registered email and password to log in.', theme),
+    buildStepsList(steps, theme)
+  ].join('');
+
+  const html = wrapEmail({
+    bodyContent,
+    preheader: `Your ${roleLabel.toLowerCase()} account is ready — welcome aboard!`,
+    theme
   });
 
   return {
-    subject: `${profile.label} onboarding completed`,
-    text: template.text,
-    html: template.html
+    subject: `${roleLabel} onboarding completed`,
+    text,
+    html
   };
 }
+
+/* ── User Blocked ─────────────────────────────────────────────── */
 
 export function buildUserBlockedTemplate({ name, role, email, phone, userNumber }) {
-  const profile = getRoleContent(role);
+  const theme = getRoleTheme(role);
   const displayName = toDisplayName(name);
-  const rows = buildRows({ email, phone, userNumber, roleLabel: profile.label });
-  const template = buildTemplate({
-    badge: profile.badge,
-    heading: `Your ${profile.label.toLowerCase()} access is blocked`,
-    intro: `There is an update to your account status in the Dr Harsha system.`,
-    greeting: `Hello ${displayName},`,
-    message: `Your ${profile.label.toLowerCase()} account has been marked as blocked in our system. You will not be able to continue using the portal until your access is restored by an administrator.`,
-    rows,
-    callout: `If you believe this status was applied by mistake, please contact the hospital administrator for support.`,
-    footer: `This is an account status notification from the Dr Harsha portal.`
+  const roleLabel = theme.label;
+
+  const text = [
+    `Hello ${displayName},`,
+    `Your ${roleLabel.toLowerCase()} account has been temporarily suspended.`,
+    `During this time you won't be able to sign in or book services.`,
+    '',
+    `Account Status: Blocked`,
+    `Effective: ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}`,
+    `${roleLabel} ID: ${userNumber || 'Not assigned'}`,
+    '',
+    'If you believe this was a mistake, please contact the hospital administrator.',
+    '',
+    '— Dr Harsha Healthcare'
+  ].join('\n');
+
+  const artHtml = buildHeroArt({ symbol: '!', color: '#EF4444', lightColor: '#FEE2E2' });
+
+  const detailRows = [
+    { icon: 'status', label: 'Account Status', badge: { bg: '#FEE2E2', color: '#B91C1C', text: 'Blocked' } },
+    { icon: 'calendar', label: 'Effective', value: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) },
+    { icon: 'reason', label: 'Reason', value: 'Pending verification' }
+  ];
+
+  const bodyContent = [
+    buildAlertHero({
+      title: 'Account Access Suspended',
+      checkText: 'Your account has been temporarily blocked',
+      description: 'Access to your Dr Harsha Healthcare account has been paused. See the details below.',
+      artHtml
+    }),
+    buildGreeting(displayName, "We're writing to let you know that your account has been temporarily suspended. During this time you won't be able to sign in or book services.", theme),
+    buildDetailTable('ACCOUNT STATUS', detailRows, theme),
+    buildCallout('Need this resolved?', 'Contact our support team and we\'ll help restore your access as quickly as possible.', 'error'),
+    buildCTAButton('Contact Support', '#EF4444')
+  ].join('');
+
+  const html = wrapEmail({
+    bodyContent,
+    preheader: 'Your account has been temporarily blocked.',
+    theme
   });
 
   return {
-    subject: `${profile.label} account blocked`,
-    text: template.text,
-    html: template.html
+    subject: `${roleLabel} account blocked`,
+    text,
+    html
   };
 }
 
+/* ── User Activated ───────────────────────────────────────────── */
+
 export function buildUserActiveTemplate({ name, role, email, phone, userNumber }) {
-  const profile = getRoleContent(role);
+  const theme = getRoleTheme(role);
   const displayName = toDisplayName(name);
-  const rows = buildRows({ email, phone, userNumber, roleLabel: profile.label });
-  const template = buildTemplate({
-    badge: profile.badge,
-    heading: `Your ${profile.label.toLowerCase()} access is active again`,
-    intro: `There is an update to your account status in the Dr Harsha system.`,
-    greeting: `Hello ${displayName},`,
-    message: `Your ${profile.label.toLowerCase()} account is now active again in our system. You can continue using the portal with your registered account credentials.`,
-    rows,
-    callout: `If you still face any access issue, please contact the hospital administrator for support.`,
-    footer: `This is an account status notification from the Dr Harsha portal.`
+  const roleLabel = theme.label;
+
+  const text = [
+    `Hello ${displayName},`,
+    `Your ${roleLabel.toLowerCase()} account has been reviewed and activated.`,
+    `You can now sign in and access all healthcare services again.`,
+    '',
+    `Account Status: Active`,
+    `Activated On: ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })}`,
+    `${roleLabel} ID: ${userNumber || 'Not assigned'}`,
+    '',
+    'Welcome back — we\'re glad to have you with us.',
+    '',
+    '— Dr Harsha Healthcare'
+  ].join('\n');
+
+  const artHtml = buildHeroArt({ symbol: '&#10003;', color: '#16A34A', lightColor: '#DCFCE7' });
+
+  const detailRows = [
+    { icon: 'status', label: 'Account Status', badge: { bg: '#DCFCE7', color: '#15803D', text: 'Active' } },
+    { icon: 'calendar', label: 'Activated On', value: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' }) },
+    { icon: 'id', label: `${roleLabel} ID`, value: userNumber ? String(userNumber) : 'Not assigned' }
+  ];
+
+  const bodyContent = [
+    buildSuccessHero({
+      title: 'Account Activated',
+      checkText: 'Your account is now active',
+      description: 'Good news — your Dr Harsha Healthcare account has been activated and is ready to use.',
+      artHtml
+    }),
+    buildGreeting(displayName, 'Your account has been reviewed and activated. You can now sign in and access all healthcare services again.', theme),
+    buildDetailTable('ACCOUNT STATUS', detailRows, theme),
+    buildCTAButton('Access Your Portal', theme.primary),
+    buildSubtitle("Welcome back — we're glad to have you with us.", theme)
+  ].join('');
+
+  const html = wrapEmail({
+    bodyContent,
+    preheader: 'Your account is now active.',
+    theme
   });
 
   return {
-    subject: `${profile.label} account activated`,
-    text: template.text,
-    html: template.html
+    subject: `${roleLabel} account activated`,
+    text,
+    html
   };
 }

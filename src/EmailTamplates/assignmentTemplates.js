@@ -1,103 +1,126 @@
-function toDisplayName(name) {
-  return typeof name === "string" && name.trim() ? name.trim() : "User";
+import {
+  ROLE_THEMES, toDisplayName, wrapEmail,
+  buildLightHero, buildBoldHero, buildHeroArt, buildBoldHeroArt,
+  buildGreeting, buildDetailTable, buildCTAButton, buildCallout
+} from './emailLayout.js';
+
+function toSafe(value, fallback) {
+  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
 }
 
-function toSafeText(value, fallback) {
-  return typeof value === "string" && value.trim() ? value.trim() : fallback;
-}
+const PRIORITY_MAP = {
+  low: 'normal',
+  medium: 'normal',
+  high: 'important',
+  critical: 'urgent'
+};
 
-const PRIORITY_COLORS = {
-  low: "#6B7280",
-  medium: "#D97706",
-  high: "#EA580C",
-  critical: "#DC2626",
+const PRIORITY_BADGES = {
+  low: { bg: '#F3F4F6', color: '#6B7280', text: 'Low' },
+  medium: { bg: '#FEF3C7', color: '#D97706', text: 'Medium' },
+  high: { bg: '#FFEDD5', color: '#EA580C', text: 'High' },
+  critical: { bg: '#FEE2E2', color: '#B91C1C', text: 'Urgent' }
 };
 
 export function buildAssignmentEmailTemplate({ recipientName, doctorName, title, description, priority, dueAt }) {
+  const theme = ROLE_THEMES.doctor;
   const displayName = toDisplayName(recipientName);
-  const safeTitle = toSafeText(title, "New Assignment");
-  const safeDescription = toSafeText(description, "No additional details provided.");
-  const safePriority = priority || "medium";
-  const priorityColor = PRIORITY_COLORS[safePriority] || PRIORITY_COLORS.medium;
-  const safeDueAt = dueAt ? new Date(dueAt).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "No due date";
-  const safeDoctorName = toSafeText(doctorName, "Your Doctor");
+  const safeTitle = toSafe(title, 'New Assignment');
+  const safeDescription = toSafe(description, 'No additional details provided.');
+  const safePriority = priority || 'medium';
+  const safeDoctorName = toSafe(doctorName, 'Your Doctor');
+  const safeDueAt = dueAt
+    ? new Date(dueAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'long', year: 'numeric' })
+    : 'No due date';
+  const style = PRIORITY_MAP[safePriority] || 'normal';
+  const priorityBadge = PRIORITY_BADGES[safePriority] || PRIORITY_BADGES.medium;
 
   const subject = `New Assignment: ${safeTitle}`;
 
   const text = [
     `Hello ${displayName},`,
-    "",
+    '',
     `You have received a new assignment from Dr. ${safeDoctorName}.`,
-    "",
+    '',
     `Title: ${safeTitle}`,
-    `Priority: ${safePriority.charAt(0).toUpperCase() + safePriority.slice(1)}`,
+    `Priority: ${priorityBadge.text}`,
     `Due: ${safeDueAt}`,
-    "",
+    '',
     `Details:`,
     safeDescription,
-    "",
-    "Please review and complete this assignment at your earliest convenience.",
-    "",
-    "— Dr Harsha Health System",
-  ].join("\n");
+    '',
+    'Please review and complete this assignment at your earliest convenience.',
+    '',
+    '— Dr Harsha Healthcare'
+  ].join('\n');
 
-  const html = `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /></head>
-<body style="margin:0;padding:0;background:#F4F7FB;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#F4F7FB;padding:32px 16px;">
-    <tr><td align="center">
-      <table width="100%" style="max-width:560px;background:#FFFFFF;border-radius:16px;border:1px solid #E5E7EB;overflow:hidden;">
-        <!-- Header -->
-        <tr><td style="background:linear-gradient(135deg,#2D6CC0,#3CB5A0);padding:28px 32px;">
-          <div style="font-size:11px;letter-spacing:0.12em;color:rgba(255,255,255,0.75);text-transform:uppercase;font-weight:600;">New Assignment</div>
-          <div style="margin-top:8px;font-size:22px;font-weight:700;color:#FFFFFF;">${safeTitle}</div>
-        </td></tr>
+  const detailRows = [
+    { icon: 'person', label: 'Patient Name', value: displayName },
+    { icon: 'doctor', label: 'Assigned By', value: `Dr. ${safeDoctorName}` },
+    { icon: 'calendar', label: 'Due Date', value: safeDueAt },
+    { icon: 'flag', label: 'Priority', badge: priorityBadge }
+  ];
 
-        <!-- Body -->
-        <tr><td style="padding:28px 32px;">
-          <div style="font-size:15px;color:#374151;line-height:1.7;">
-            Hello <strong>${displayName}</strong>,
-          </div>
-          <div style="margin-top:12px;font-size:14px;color:#6B7280;line-height:1.7;">
-            Dr. <strong>${safeDoctorName}</strong> has assigned you a new task. Please review the details below.
-          </div>
+  let heroHtml;
+  let ctaColor;
+  let calloutHtml = '';
 
-          <!-- Assignment card -->
-          <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:20px;border:1px solid #E5E7EB;border-radius:12px;overflow:hidden;">
-            <tr><td style="padding:16px 20px;background:#F9FAFB;">
-              <table width="100%" cellpadding="0" cellspacing="0">
-                <tr>
-                  <td style="font-size:12px;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;padding-bottom:6px;">Priority</td>
-                  <td style="font-size:12px;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;padding-bottom:6px;">Due date</td>
-                </tr>
-                <tr>
-                  <td style="font-size:14px;font-weight:700;color:${priorityColor};">${safePriority.charAt(0).toUpperCase() + safePriority.slice(1)}</td>
-                  <td style="font-size:14px;font-weight:600;color:#374151;">${safeDueAt}</td>
-                </tr>
-              </table>
-            </td></tr>
-            <tr><td style="padding:16px 20px;">
-              <div style="font-size:12px;color:#9CA3AF;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:8px;">Description</div>
-              <div style="font-size:14px;color:#374151;line-height:1.7;white-space:pre-line;">${safeDescription}</div>
-            </td></tr>
-          </table>
+  if (style === 'urgent') {
+    const artHtml = buildBoldHeroArt({ symbol: '!' });
+    heroHtml = buildBoldHero({
+      bgColor: '#EF4444',
+      badgeText: 'URGENT',
+      title: `Urgent: ${safeTitle}`,
+      description: 'A patient requires your attention. Please review and respond as soon as possible.',
+      artHtml
+    });
+    ctaColor = '#EF4444';
+    calloutHtml = buildCallout(
+      'Action Required',
+      'Please acknowledge this assignment within 30 minutes, or it may be escalated to another clinician.',
+      'error'
+    );
+  } else if (style === 'important') {
+    const artHtml = buildBoldHeroArt({ symbol: '!' });
+    heroHtml = buildBoldHero({
+      bgColor: '#F59E0B',
+      badgeText: 'IMPORTANT',
+      title: `Important: ${safeTitle}`,
+      description: 'You have a new priority assignment. Please review the details and take action.',
+      artHtml
+    });
+    ctaColor = '#F59E0B';
+    calloutHtml = buildCallout(
+      'Priority Notice',
+      'This assignment is marked as important. Please review and acknowledge soon.',
+      'warning'
+    );
+  } else {
+    const artHtml = buildHeroArt({ symbol: '&#10003;', color: theme.primary, lightColor: theme.artBg });
+    heroHtml = buildLightHero({
+      theme,
+      badgeText: 'Care Team',
+      title: 'New Patient Assignment',
+      checkText: 'A patient has been assigned to you',
+      description: 'Please review the assignment details and confirm your availability.',
+      artHtml
+    });
+    ctaColor = theme.primary;
+  }
 
-          <div style="margin-top:20px;font-size:13px;color:#9CA3AF;line-height:1.6;">
-            Please complete this assignment at your earliest convenience. If you have questions, contact Dr. ${safeDoctorName} directly.
-          </div>
-        </td></tr>
+  const bodyContent = [
+    heroHtml,
+    buildGreeting(displayName, `You have a new patient assignment in your Dr Harsha Healthcare care queue. The details are below.`, theme),
+    buildDetailTable('ASSIGNMENT DETAILS', detailRows, theme),
+    buildCTAButton('View Assignment', ctaColor),
+    calloutHtml
+  ].join('');
 
-        <!-- Footer -->
-        <tr><td style="padding:20px 32px;border-top:1px solid #F3F4F6;background:#FAFAFA;">
-          <div style="font-size:12px;color:#9CA3AF;text-align:center;">Dr Harsha Health System &middot; Assignment Notification</div>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`;
+  const html = wrapEmail({
+    bodyContent,
+    preheader: `New assignment: ${safeTitle}.`,
+    theme
+  });
 
   return { subject, text, html };
 }
