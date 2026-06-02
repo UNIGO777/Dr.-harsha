@@ -11,6 +11,7 @@ import { userRouter } from "./routes/userRoutes.js";
 import { patientRouter } from "./routes/patientRoutes.js";
 import { nurseRouter } from "./routes/nurseRoutes.js";
 import { connectDb } from "./utils/connectDb.js";
+import { authMiddleware } from "./middlewares/authMiddleware.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -120,11 +121,14 @@ app.get("/health", (req, res) => {
   res.json({ ok: true });
 });
 
-app.use("/api", gptRouter);
+// Auth routes — no token required
 app.use("/api/auth", authRouter);
+
+// Protected routes — require valid token
 app.use("/api/users", userRouter);
 app.use("/api/patient", patientRouter);
 app.use("/api/nurse", nurseRouter);
+app.use("/api", authMiddleware, gptRouter);
 
 app.use((err, req, res, next) => {
   const requestId = res.getHeader("x-request-id") || "unknown";
