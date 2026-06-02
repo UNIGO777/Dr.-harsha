@@ -1653,7 +1653,12 @@ export async function scheduleDoctorAppointmentController(req, res) {
       ]
     });
 
-    await createPreAppointmentFollowUpTask({ appointment, patient, doctor, nurseId: null, reason });
+    // Use the first assigned nurse from the patient profile for the pre-appointment follow-up
+    const appointmentNurseId =
+      Array.isArray(patientProfile.assignedNurses) && patientProfile.assignedNurses.length > 0
+        ? patientProfile.assignedNurses[0].toString()
+        : null;
+    await createPreAppointmentFollowUpTask({ appointment, patient, doctor, nurseId: appointmentNurseId, reason });
     await syncPatientNextAppointment(patient._id);
 
     const warnings = [];
@@ -1743,10 +1748,20 @@ export async function scheduleDoctorFollowUpController(req, res) {
       }
     }
 
+    // Pick the first assigned nurse from the patient profile for the CRM task
+    const assignedNurseId =
+      Array.isArray(patientProfile.assignedNurses) && patientProfile.assignedNurses.length > 0
+        ? patientProfile.assignedNurses[0].toString()
+        : null;
+    if (!assignedNurseId) {
+      return res.status(400).json({ error: "This patient has no nurse assigned. Please assign a nurse to the patient first." });
+    }
+
     const title = `Follow up with ${patient.name}`;
     const task = await CrmTask.create({
       patient: patient._id,
       assignedDoctor: doctor._id,
+      assignedNurse: assignedNurseId,
       title,
       description: reason,
       category: "appointment_confirmation",
