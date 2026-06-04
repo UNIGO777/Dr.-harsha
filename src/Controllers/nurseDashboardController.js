@@ -23,9 +23,6 @@ async function getNurseDashboardScope(nurseId) {
   const managedDoctor = nurseProfile?.assignedDoctor || null;
 
   const patientQuery = { assignedNurses: nurseId };
-  if (managedDoctor?._id) {
-    patientQuery.assignedDoctors = managedDoctor._id;
-  }
 
   const patientProfiles = await PatientProfile.find(patientQuery)
     .populate("user", "name email phone status userNumber")
