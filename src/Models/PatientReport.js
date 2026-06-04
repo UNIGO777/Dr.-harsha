@@ -30,7 +30,7 @@ const patientReportSchema = new mongoose.Schema(
   {
     patient: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
     reportNumber: { type: Number, required: true, min: 1 },
-    assignedNurse: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    assignedNurse: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
     assignedDoctor: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
     reportValues: { type: mongoose.Schema.Types.Mixed, default: {} },
     generatedReport: { type: mongoose.Schema.Types.Mixed, default: null },

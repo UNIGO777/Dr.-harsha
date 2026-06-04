@@ -359,9 +359,17 @@ export async function createPatientReportController(req, res) {
     if (access.error) return res.status(access.error.status).json(access.error.body);
 
     const isDoctor = access.actor?.role === "doctor";
+    let nurseId = isDoctor ? null : access.actorId;
+
+    // When a doctor creates a report, try to use the patient's first assigned nurse
+    if (isDoctor && !nurseId) {
+      const patientProfile = await PatientProfile.findOne({ user: access.patientId }).select("assignedNurses").lean();
+      nurseId = patientProfile?.assignedNurses?.[0] || null;
+    }
+
     const report = await createEmptyPatientReport({
       patientId: access.patientId,
-      nurseId: isDoctor ? null : access.actorId,
+      nurseId,
       managedDoctorId: isDoctor ? access.actorId : (access.managedDoctor?._id || null),
       createdById: access.actorId,
     });
@@ -510,8 +518,11 @@ export async function uploadPatientReportDocumentsController(req, res) {
       createdDocuments.push(report.uploadedDocuments[report.uploadedDocuments.length - 1]);
     }
 
-    report.assignedNurse = access.actorId;
-    report.assignedDoctor = access.managedDoctor?._id || null;
+    // Only nurses update assignedNurse — doctors uploading must not overwrite it
+    if (access.actor?.role === "nurse") {
+      report.assignedNurse = access.actorId;
+      report.assignedDoctor = access.managedDoctor?._id || null;
+    }
     report.activeStepId = stepId || report.activeStepId || "";
     report.lastSavedStepId = stepId || report.lastSavedStepId || "";
     report.lastSavedAt = new Date();
