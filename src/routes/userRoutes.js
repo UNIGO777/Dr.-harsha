@@ -134,7 +134,7 @@ userRouter.post("/nurse/appointments/:appointmentId/instruction-draft", authMidd
 userRouter.post("/nurse/follow-ups", authMiddleware, roleMiddleware(["nurse"]), scheduleNurseFollowUpController);
 userRouter.post("/patients/:patientId/medications", authMiddleware, roleMiddleware(["doctor", "nurse"]), addPatientMedicationController);
 userRouter.post("/nurse/patients/:patientId/notes", authMiddleware, roleMiddleware(["nurse"]), addNursePatientProfileNoteController);
-userRouter.post("/nurse/patients/:patientId/reports", authMiddleware, roleMiddleware(["nurse", "super_admin"]), createPatientReportController);
+userRouter.post("/nurse/patients/:patientId/reports", authMiddleware, roleMiddleware(["nurse", "doctor", "super_admin"]), createPatientReportController);
 userRouter.post(
   "/nurse/patients/:patientId/report/documents",
   authMiddleware,

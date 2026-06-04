@@ -285,15 +285,16 @@ async function ensurePatientReportNumbers(patientId) {
   }
 }
 
-async function createEmptyPatientReport({ patientId, nurseId, managedDoctorId }) {
+async function createEmptyPatientReport({ patientId, nurseId, managedDoctorId, createdById }) {
   const reportNumber = await getNextPatientReportNumber(patientId);
+  const actorId = createdById || nurseId;
   const report = new PatientReport({
     patient: patientId,
     reportNumber,
-    assignedNurse: nurseId,
+    assignedNurse: nurseId || null,
     assignedDoctor: managedDoctorId || null,
-    createdBy: nurseId,
-    updatedBy: nurseId,
+    createdBy: actorId,
+    updatedBy: actorId,
   });
   await report.save();
   return report;
@@ -354,13 +355,15 @@ export async function listPatientReportsController(req, res) {
 
 export async function createPatientReportController(req, res) {
   try {
-    const access = await ensurePatientReportAccess({ req, allowDoctor: false });
+    const access = await ensurePatientReportAccess({ req, allowDoctor: true });
     if (access.error) return res.status(access.error.status).json(access.error.body);
 
+    const isDoctor = access.actor?.role === "doctor";
     const report = await createEmptyPatientReport({
       patientId: access.patientId,
-      nurseId: access.actorId,
-      managedDoctorId: access.managedDoctor?._id || null,
+      nurseId: isDoctor ? null : access.actorId,
+      managedDoctorId: isDoctor ? access.actorId : (access.managedDoctor?._id || null),
+      createdById: access.actorId,
     });
 
     return res.status(201).json({

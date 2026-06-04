@@ -994,23 +994,7 @@ export async function listNursePatientManagementController(req, res) {
 
     const managedDoctor = nurseProfile?.assignedDoctor || null;
 
-    if (!managedDoctor?._id) {
-      return res.json({
-        patients: [],
-        summary: buildPatientManagementSummary([]),
-        options: {
-          patients: [],
-          doctors: []
-        },
-        context: {
-          nurseId: nurseId.toString(),
-          managedDoctor: null
-        }
-      });
-    }
-
     const patientProfiles = await PatientProfile.find({
-      assignedDoctors: managedDoctor._id,
       assignedNurses: nurseId
     })
       .populate("user", "name email role phone gender status userNumber createdAt updatedAt lastLoginAt")
