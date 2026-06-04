@@ -436,10 +436,9 @@ async function getManagedDoctorForNurse(nurseId) {
   return nurseProfile.assignedDoctor;
 }
 
-async function ensurePatientInNurseScope({ patientId, nurseId, managedDoctorId }) {
+async function ensurePatientInNurseScope({ patientId, nurseId }) {
   const patientProfile = await PatientProfile.findOne({
     user: patientId,
-    assignedDoctors: managedDoctorId,
     assignedNurses: nurseId
   }).lean();
 
@@ -872,7 +871,7 @@ export async function listDoctorAppointmentSlotsController(req, res) {
         return res.status(403).json({ error: "You can only view slots for your managed doctor" });
       }
       if (requestedPatientId) {
-        await ensurePatientInNurseScope({ patientId: requestedPatientId, nurseId: requesterId, managedDoctorId: managedDoctor._id });
+        await ensurePatientInNurseScope({ patientId: requestedPatientId, nurseId: requesterId, });
       }
     }
 
@@ -981,11 +980,10 @@ export async function listNurseUpcomingAppointmentsController(req, res) {
     }
 
     if (selectedPatientId) {
-      await ensurePatientInNurseScope({ patientId: selectedPatientId, nurseId, managedDoctorId: managedDoctor._id });
+      await ensurePatientInNurseScope({ patientId: selectedPatientId, nurseId, });
     }
 
     const patientProfiles = await PatientProfile.find({
-      assignedDoctors: managedDoctor._id,
       assignedNurses: nurseId
     })
       .populate("user", "name email phone status userNumber")
@@ -1113,8 +1111,7 @@ export async function generateNurseAppointmentInstructionDraftController(req, re
       }
       patientProfile = await ensurePatientInNurseScope({
         patientId: appointment.patient?._id?.toString?.() || "",
-        nurseId: userId,
-        managedDoctorId: managedDoctor._id
+        nurseId: userId
       });
       contextDoctor = managedDoctor;
     }
@@ -1178,7 +1175,7 @@ export async function scheduleNurseAppointmentController(req, res) {
       findUserByRole(patientId, "patient", "patient"),
       findUserByRole(doctorId, "doctor", "doctor")
     ]);
-    await ensurePatientInNurseScope({ patientId: patient._id, nurseId, managedDoctorId: managedDoctor._id });
+    await ensurePatientInNurseScope({ patientId: patient._id, nurseId, });
 
     const availability = await ensureDoctorAvailability({ doctor, scheduledAt });
 
@@ -1307,7 +1304,7 @@ export async function scheduleNurseFollowUpController(req, res) {
       findUserByRole(patientId, "patient", "patient"),
       findUserByRole(doctorId, "doctor", "doctor")
     ]);
-    await ensurePatientInNurseScope({ patientId: patient._id, nurseId, managedDoctorId: managedDoctor._id });
+    await ensurePatientInNurseScope({ patientId: patient._id, nurseId, });
 
     const title = `Follow up with ${patient.name}`;
 
@@ -1409,7 +1406,6 @@ export async function updateNurseAppointmentController(req, res) {
 
     const patientProfile = await PatientProfile.findOne({
       user: appointment.patient?._id,
-      assignedDoctors: appointment.doctor?._id,
       assignedNurses: nurseId
     }).lean();
 

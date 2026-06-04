@@ -318,10 +318,6 @@ async function getNurseCrmScope(nurseId) {
   const managedDoctor = nurseProfile?.assignedDoctor || null;
   const patientQuery = { assignedNurses: nurseId };
 
-  if (managedDoctor?._id) {
-    patientQuery.assignedDoctors = managedDoctor._id;
-  }
-
   const patientProfiles = await PatientProfile.find(patientQuery)
     .populate("user", "name email phone status userNumber updatedAt")
     .sort({ updatedAt: -1 })
@@ -339,21 +335,15 @@ async function getNurseCrmScope(nurseId) {
   };
 }
 
-async function ensurePatientInScope({ nurseId, patientId, managedDoctorId }) {
+async function ensurePatientInScope({ nurseId, patientId }) {
   if (!/^[a-f\d]{24}$/i.test(patientId)) {
     throw createRequestError("Invalid patientId");
   }
 
-  const query = {
+  const patientProfile = await PatientProfile.findOne({
     user: patientId,
     assignedNurses: nurseId
-  };
-
-  if (managedDoctorId) {
-    query.assignedDoctors = managedDoctorId;
-  }
-
-  const patientProfile = await PatientProfile.findOne(query)
+  })
     .populate("user", "name email phone status userNumber")
     .lean();
 
@@ -459,8 +449,7 @@ export async function createNurseCrmTaskController(req, res) {
     const { managedDoctor } = await getNurseCrmScope(nurseId);
     const patientProfile = await ensurePatientInScope({
       nurseId,
-      patientId,
-      managedDoctorId: managedDoctor?._id?.toString?.() || ""
+      patientId
     });
 
     if (linkedNextTaskId) {
@@ -542,8 +531,7 @@ export async function generateNurseCrmTaskDraftController(req, res) {
     const { managedDoctor } = await getNurseCrmScope(nurseId);
     const patientProfile = await ensurePatientInScope({
       nurseId,
-      patientId,
-      managedDoctorId: managedDoctor?._id?.toString?.() || ""
+      patientId
     });
 
     const draft = await generateAiNurseCrmTaskDraft({

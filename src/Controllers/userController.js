@@ -444,10 +444,9 @@ async function getManagedDoctorForNurse(nurseId) {
   return nurseProfile.assignedDoctor;
 }
 
-function buildScopedPatientProfileQuery({ nurseId, managedDoctorId, patientId }) {
+function buildScopedPatientProfileQuery({ nurseId, patientId }) {
   return {
     user: ensureObjectId(patientId, "patientId"),
-    assignedDoctors: managedDoctorId,
     assignedNurses: nurseId
   };
 }
@@ -466,7 +465,6 @@ async function resolvePatientMedicationAccess({ actor }) {
     const patientProfile = await PatientProfile.findOne(
       buildScopedPatientProfileQuery({
         nurseId: actorId,
-        managedDoctorId: managedDoctor._id,
         patientId
       })
     );
@@ -1042,7 +1040,6 @@ export async function getNursePatientProfileController(req, res) {
     const managedDoctor = await getManagedDoctorForNurse(nurseId);
     const patientProfileQuery = buildScopedPatientProfileQuery({
       nurseId,
-      managedDoctorId: managedDoctor._id,
       patientId
     });
 
@@ -1327,10 +1324,9 @@ export async function addNursePatientProfileNoteController(req, res) {
       return res.status(400).json({ error: "content is required" });
     }
 
-    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    await getManagedDoctorForNurse(nurseId);
     const patientProfileQuery = buildScopedPatientProfileQuery({
       nurseId,
-      managedDoctorId: managedDoctor._id,
       patientId
     });
 
@@ -1484,10 +1480,9 @@ export async function updateNursePatientProfileNoteController(req, res) {
       return res.status(400).json({ error: "content is required" });
     }
 
-    const managedDoctor = await getManagedDoctorForNurse(nurseId);
+    await getManagedDoctorForNurse(nurseId);
     const patientProfileQuery = buildScopedPatientProfileQuery({
       nurseId,
-      managedDoctorId: managedDoctor._id,
       patientId
     });
 

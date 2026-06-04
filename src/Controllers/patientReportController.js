@@ -173,11 +173,10 @@ async function getManagedDoctorForNurse(nurseId) {
   return nurseProfile.assignedDoctor;
 }
 
-async function ensurePatientInNurseScope({ patientId, nurseId, managedDoctorId }) {
+async function ensurePatientInNurseScope({ patientId, nurseId }) {
   const patientProfile = await PatientProfile.findOne({
     user: patientId,
     assignedNurses: nurseId,
-    ...(managedDoctorId ? { assignedDoctors: managedDoctorId } : {}),
   }).lean();
 
   if (!patientProfile?._id) {
@@ -196,7 +195,6 @@ async function ensurePatientInActorScope({ patientId, actor }) {
     const patientProfile = await ensurePatientInNurseScope({
       patientId,
       nurseId: actorId,
-      managedDoctorId: managedDoctor?._id?.toString?.() || "",
     });
     return { patientProfile, managedDoctor };
   }
