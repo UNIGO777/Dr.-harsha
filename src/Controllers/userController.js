@@ -12,6 +12,11 @@ import {
   PATIENT_TAG_OPTIONS,
   PatientProfile
 } from "../Models/PatientProfile.js";
+import {
+  buildPatientIntakeResponse,
+  buildPatientIntakeUpdate,
+  normalizePatientIntake
+} from "../utils/patientIntake.js";
 import { createUserNotification } from "./notificationController.js";
 import { sendUserActiveEmail, sendUserBlockedEmail, sendUserOnboardingEmail } from "../utils/emailService.js";
 import { canCreateUser } from "../utils/permissions.js";
@@ -177,6 +182,7 @@ async function buildUsersResponse(users) {
           : [],
         age: typeof profile?.age === "number" ? profile.age : null,
         reference: normalizeString(profile?.reference),
+        intake: buildPatientIntakeResponse(profile),
         address: normalizeString(profile?.address),
         secondaryPhone: normalizeString(profile?.secondaryPhone),
         services: Array.isArray(profile?.services) ? profile.services : [],
@@ -194,6 +200,7 @@ async function buildUsersResponse(users) {
     assignedNurses: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.assignedNurses || [] : [],
     age: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.age ?? null : null,
     reference: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.reference || "" : "",
+    intake: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.intake || null : null,
     address: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.address || "" : "",
     secondaryPhone: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.secondaryPhone || "" : "",
     services: user.role === "patient" ? patientAssignmentsByUserId.get(user._id.toString())?.services || [] : [],
@@ -226,6 +233,7 @@ function buildPatientManagementResponse({ profile, managedDoctor }) {
     assignedNurses,
     age: typeof profile?.age === "number" ? profile.age : null,
     reference: normalizeString(profile?.reference),
+    intake: buildPatientIntakeResponse(profile),
     address: normalizeString(profile?.address),
     secondaryPhone: normalizeString(profile?.secondaryPhone),
     services: Array.isArray(profile?.services) ? profile.services : [],
@@ -835,6 +843,7 @@ export async function createUserController(req, res) {
     const patientSecondaryPhone = parsePatientTextField(req?.body?.secondaryPhone);
     const patientServices = normalizePatientSelection(req?.body?.services, PATIENT_SERVICE_OPTIONS);
     const patientTags = normalizePatientSelection(req?.body?.tags, PATIENT_TAG_OPTIONS);
+    const patientIntake = role === "patient" ? normalizePatientIntake(req?.body?.intake, { capturedBy: creator?._id || null }) : null;
 
     if (!name || !email || !password || !role) {
       return res.status(400).json({ error: "name, email, password, role are required" });
@@ -866,6 +875,7 @@ export async function createUserController(req, res) {
         assignedNurses: patientCareTeam?.assignedNurseIds || [],
         age: patientAge.value,
         reference: patientReference.value,
+        intake: patientIntake,
         address: patientAddress.value,
         secondaryPhone: patientSecondaryPhone.value,
         services: patientServices,
@@ -896,6 +906,7 @@ export async function createUserController(req, res) {
         assignedNurses: patientCareTeam?.nurses?.map((nurse) => buildCareTeamMemberResponse(nurse)).filter(Boolean) || [],
         age: role === "patient" ? patientAge.value : null,
         reference: role === "patient" ? patientReference.value : "",
+        intake: role === "patient" ? buildPatientIntakeResponse({ intake: patientIntake }) : null,
         address: role === "patient" ? patientAddress.value : "",
         secondaryPhone: role === "patient" ? patientSecondaryPhone.value : "",
         services: role === "patient" ? patientServices : [],
@@ -1663,6 +1674,7 @@ export async function updateUserController(req, res) {
     const hasSecondaryPhone = Object.prototype.hasOwnProperty.call(req?.body || {}, "secondaryPhone");
     const hasServices = Object.prototype.hasOwnProperty.call(req?.body || {}, "services");
     const hasTags = Object.prototype.hasOwnProperty.call(req?.body || {}, "tags");
+    const hasIntake = Object.prototype.hasOwnProperty.call(req?.body || {}, "intake");
     const patientAge = parsePatientAge(req?.body?.age);
     const patientReference = parsePatientTextField(req?.body?.reference);
     const patientAddress = parsePatientTextField(req?.body?.address);
@@ -1711,7 +1723,10 @@ export async function updateUserController(req, res) {
       hasChanges = true;
     }
 
-    if (user.role === "patient" && (hasAssignedDoctorIds || hasAssignedNurseIds || hasAge || hasReference || hasAddress || hasSecondaryPhone || hasServices || hasTags)) {
+    if (
+      user.role === "patient" &&
+      (hasAssignedDoctorIds || hasAssignedNurseIds || hasAge || hasReference || hasAddress || hasSecondaryPhone || hasServices || hasTags || hasIntake)
+    ) {
       const existingProfile = await PatientProfile.findOne({ user: user._id }).lean();
       const patientCareTeam = await resolvePatientCareTeam({
         creator: req.user,
@@ -1739,7 +1754,13 @@ export async function updateUserController(req, res) {
             ...(hasAddress ? { address: patientAddress.value } : {}),
             ...(hasSecondaryPhone ? { secondaryPhone: patientSecondaryPhone.value } : {}),
             ...(hasServices ? { services: patientServices } : {}),
-            ...(hasTags ? { tags: patientTags } : {})
+            ...(hasTags ? { tags: patientTags } : {}),
+            ...(hasIntake
+              ? buildPatientIntakeUpdate(req.body.intake, {
+                  capturedBy: req?.user?._id || null,
+                  existingIntake: existingProfile?.intake || null
+                })
+              : {})
           }
         },
         { upsert: true, new: true }

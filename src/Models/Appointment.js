@@ -32,6 +32,10 @@ const appointmentSchema = new mongoose.Schema(
     documentsRequired: { type: Boolean, default: false },
     reportsRequired: { type: Boolean, default: false },
     preVisitUpdateRequired: { type: Boolean, default: false },
+    // Reschedule metric: a rescheduled appointment keeps its normal status,
+    // these fields feed the booked/cancelled/rescheduled/no-show breakdown
+    rescheduleCount: { type: Number, min: 0, default: 0 },
+    lastRescheduledAt: { type: Date, default: null },
     confirmationSentAt: { type: Date, default: null },
     lastReminderAt: { type: Date, default: null },
     lastReminderType: { type: String, enum: ["reminder", "confirmation", "instructions", ""], default: "" },

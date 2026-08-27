@@ -2,6 +2,159 @@ import { User } from "../Models/User.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
 import { Appointment } from "../Models/Appointment.js";
 import { CrmTask } from "../Models/CrmTask.js";
+import { Lead } from "../Models/Lead.js";
+import { Recommendation } from "../Models/Recommendation.js";
+import { Payment } from "../Models/Payment.js";
+import { Enrollment } from "../Models/Enrollment.js";
+import { ReferralRequest } from "../Models/ReferralRequest.js";
+import { GoogleReview } from "../Models/GoogleReview.js";
+import { BackupRun } from "../Models/BackupRun.js";
+import { LEAD_UNCONTACTED_ALERT_HOURS } from "./leadController.js";
+
+/**
+ * "This month" tiles + red alerts for the admin dashboard.
+ * Kept in one function so the payload is assembled with a single Promise.all.
+ */
+async function buildThisMonthAndAlerts(now) {
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const weekAhead = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const uncontactedCutoff = new Date(now.getTime() - LEAD_UNCONTACTED_ALERT_HOURS * 60 * 60 * 1000);
+
+  const [
+    leadsReceived,
+    leadsContacted,
+    appointmentsBooked,
+    appointmentsAttended,
+    lyfRecommended,
+    lyfBooked,
+    monthPayments,
+    programmeEnrolments,
+    followUpsOverdue,
+    renewalsDueThisWeek,
+    googleReviews,
+    referralsGenerated,
+    uncontactedLeads,
+    latestBackup,
+    recentCompletedPatients,
+    lyfDiscussedPatients,
+    activeEnrollmentPatients
+  ] = await Promise.all([
+    Lead.countDocuments({ createdAt: { $gte: monthStart } }),
+    Lead.countDocuments({ firstContactedAt: { $gte: monthStart } }),
+    Appointment.countDocuments({ createdAt: { $gte: monthStart } }),
+    Appointment.countDocuments({ status: "completed", scheduledAt: { $gte: monthStart } }),
+    Recommendation.countDocuments({ category: "lyfinfinity", recommendedAt: { $gte: monthStart } }),
+    Recommendation.countDocuments({ category: "lyfinfinity", bookedAt: { $gte: monthStart } }),
+    Payment.aggregate([
+      { $match: { paidAt: { $gte: monthStart } } },
+      { $unwind: "$allocations" },
+      { $group: { _id: "$allocations.category", total: { $sum: "$allocations.amount" } } }
+    ]),
+    Enrollment.countDocuments({ category: { $in: ["programme", "lyfinfinity", "diet"] }, createdAt: { $gte: monthStart } }),
+    PatientProfile.countDocuments({ followUpDueAt: { $ne: null, $lt: now } }),
+    Enrollment.countDocuments({ status: "active", renewalDueAt: { $ne: null, $gte: now, $lte: weekAhead } }),
+    GoogleReview.countDocuments({ reviewedAt: { $gte: monthStart } }),
+    ReferralRequest.countDocuments({ status: { $in: ["referred", "converted"] }, referredAt: { $gte: monthStart } }),
+    Lead.countDocuments({ stage: "new", createdAt: { $lt: uncontactedCutoff } }),
+    BackupRun.findOne({}).sort({ startedAt: -1 }).lean(),
+    Appointment.distinct("patient", { status: "completed", scheduledAt: { $gte: thirtyDaysAgo } }),
+    Recommendation.distinct("patient", { category: "lyfinfinity" }),
+    Enrollment.distinct("patient", { status: "active" })
+  ]);
+
+  const totalRevenue = Math.round(monthPayments.reduce((sum, row) => sum + row.total, 0) * 100) / 100;
+  const lyfRevenue =
+    Math.round((monthPayments.find((row) => row._id === "lyfinfinity")?.total || 0) * 100) / 100;
+
+  // "Eligible patients left without a LyfInfinity discussion":
+  // completed a visit in the last 30 days, never had a LyfInfinity recommendation
+  const lyfDiscussedSet = new Set(lyfDiscussedPatients.map((id) => id.toString()));
+  const missedLyfDiscussion = recentCompletedPatients.filter((id) => !lyfDiscussedSet.has(id.toString())).length;
+
+  // "Programme patients missed follow-up": active enrollment + overdue follow-up
+  const programmeMissedFollowUp = activeEnrollmentPatients.length
+    ? await PatientProfile.countDocuments({
+        user: { $in: activeEnrollmentPatients },
+        followUpDueAt: { $ne: null, $lt: now }
+      })
+    : 0;
+
+  const alerts = [];
+  if (uncontactedLeads > 0) {
+    alerts.push({
+      severity: "red",
+      key: "uncontacted_leads",
+      count: uncontactedLeads,
+      message: `${uncontactedLeads} lead${uncontactedLeads === 1 ? " has" : "s have"} not been called.`
+    });
+  }
+  if (missedLyfDiscussion > 0) {
+    alerts.push({
+      severity: "red",
+      key: "missed_lyf_discussion",
+      count: missedLyfDiscussion,
+      message: `${missedLyfDiscussion} eligible patient${missedLyfDiscussion === 1 ? "" : "s"} left without a LyfInfinity discussion.`
+    });
+  }
+  if (programmeMissedFollowUp > 0) {
+    alerts.push({
+      severity: "red",
+      key: "programme_missed_followup",
+      count: programmeMissedFollowUp,
+      message: `${programmeMissedFollowUp} programme patient${programmeMissedFollowUp === 1 ? "" : "s"} missed follow-up.`
+    });
+  }
+  if (renewalsDueThisWeek > 0) {
+    alerts.push({
+      severity: "red",
+      key: "renewals_due",
+      count: renewalsDueThisWeek,
+      message: `${renewalsDueThisWeek} renewal${renewalsDueThisWeek === 1 ? " is" : "s are"} due this week.`
+    });
+  }
+  if (!latestBackup) {
+    alerts.push({
+      severity: "amber",
+      key: "backup_not_configured",
+      count: 0,
+      message: "Automated database backups are not configured yet."
+    });
+  } else if (latestBackup.status === "failed") {
+    alerts.push({
+      severity: "red",
+      key: "backup_failed",
+      count: 1,
+      message: "Database backup failed on its last run."
+    });
+  } else if (new Date(latestBackup.startedAt).getTime() < now.getTime() - 26 * 60 * 60 * 1000) {
+    alerts.push({
+      severity: "red",
+      key: "backup_stale",
+      count: 1,
+      message: "No successful database backup in the last 24 hours."
+    });
+  }
+
+  return {
+    thisMonth: {
+      leadsReceived,
+      leadsContacted,
+      appointmentsBooked,
+      appointmentsAttended,
+      lyfRecommended,
+      lyfBooked,
+      lyfRevenue,
+      programmeEnrolments,
+      totalRevenue,
+      followUpsOverdue,
+      renewalsDueThisWeek,
+      googleReviews,
+      referralsGenerated
+    },
+    alerts
+  };
+}
 
 function buildUserOption(user) {
   if (!user?._id) return null;
@@ -111,7 +264,11 @@ export async function getAdminDashboardController(req, res) {
       CrmTask.countDocuments({ status: { $in: ["pending", "in_progress"] }, dueAt: { $lt: now, $ne: null } })
     ]);
 
+    const { thisMonth, alerts } = await buildThisMonthAndAlerts(now);
+
     return res.json({
+      thisMonth,
+      alerts,
       summary: {
         totalDoctors,
         totalNurses,

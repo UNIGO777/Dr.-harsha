@@ -1,5 +1,6 @@
 import { User } from "../Models/User.js";
 import { PatientProfile } from "../Models/PatientProfile.js";
+import { buildPatientIntakeResponse } from "../utils/patientIntake.js";
 
 export async function getPatientProfileController(req, res) {
   try {
@@ -35,6 +36,7 @@ export async function getPatientProfileController(req, res) {
         address: profile?.address || "",
         secondaryPhone: profile?.secondaryPhone || "",
         reference: profile?.reference || "",
+        intake: buildPatientIntakeResponse(profile),
         services: profile?.services || [],
         tags: profile?.tags || [],
         priority: profile?.priority || "medium",

@@ -9,6 +9,7 @@ import {
   PatientProfile
 } from "../Models/PatientProfile.js";
 import { PatientReport } from "../Models/PatientReport.js";
+import { buildPatientIntakeResponse } from "../utils/patientIntake.js";
 
 const TERMINAL_APPOINTMENT_STATUSES = ["completed", "cancelled", "no_show"];
 
@@ -261,6 +262,7 @@ export async function getAdminPatientProfileController(req, res) {
         priority: profile.priority || "medium",
         age: typeof profile.age === "number" ? profile.age : null,
         reference: normalizeString(profile.reference),
+        intake: buildPatientIntakeResponse(profile),
         address: normalizeString(profile.address),
         secondaryPhone: normalizeString(profile.secondaryPhone),
         services: Array.isArray(profile.services) ? profile.services : [],

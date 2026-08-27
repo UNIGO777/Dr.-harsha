@@ -11,6 +11,7 @@ import { userRouter } from "./routes/userRoutes.js";
 import { patientRouter } from "./routes/patientRoutes.js";
 import { nurseRouter } from "./routes/nurseRoutes.js";
 import { connectDb } from "./utils/connectDb.js";
+import { startBackupScheduler } from "./utils/backupScheduler.js";
 import { authMiddleware } from "./middlewares/authMiddleware.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -173,6 +174,12 @@ async function start() {
     const server = app.listen(port, "0.0.0.0", () => {
       console.log(`API listening on http://localhost:${port}`);
     });
+
+    if (process.env.BACKUP_ENABLED === "true") {
+      startBackupScheduler();
+    } else {
+      console.warn("[Startup] Automated backups DISABLED — set BACKUP_ENABLED=true in .env to enable the daily backup.");
+    }
 
     const REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
     server.setTimeout(REQUEST_TIMEOUT_MS);

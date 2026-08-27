@@ -76,6 +76,40 @@ import {
   updateDoctorAssignmentController
 } from "../Controllers/doctorAssignmentController.js";
 import { generatePdfController } from "../Controllers/pdfController.js";
+import {
+  convertLeadController,
+  createLeadController,
+  listLeadsController,
+  updateLeadController
+} from "../Controllers/leadController.js";
+import {
+  cancelInvoiceController,
+  createInvoiceController,
+  createServiceController,
+  listInvoicesController,
+  listServicesController,
+  recordPaymentController,
+  revenueSummaryController,
+  updateServiceController
+} from "../Controllers/billingController.js";
+import {
+  createGoogleReviewController,
+  createRecommendationController,
+  createReferralController,
+  listEnrollmentsController,
+  listGoogleReviewsController,
+  listRecommendationsController,
+  listReferralsController,
+  updateEnrollmentController,
+  updateRecommendationStageController,
+  updateReferralController
+} from "../Controllers/growthController.js";
+import {
+  acknowledgePreConsultationNoteController,
+  getPreConsultationNoteController,
+  listDoctorPreConsultationNotesController,
+  upsertPreConsultationNoteController
+} from "../Controllers/preConsultationController.js";
 import { authMiddleware } from "../middlewares/authMiddleware.js";
 import { roleMiddleware } from "../middlewares/roleMiddleware.js";
 
@@ -176,6 +210,46 @@ userRouter.delete(
   deletePatientReportDocumentController
 );
 userRouter.post("/generate-pdf", authMiddleware, roleMiddleware(["nurse", "doctor", "super_admin"]), generatePdfController);
+
+// ── Lead register ────────────────────────────────────────────────────
+userRouter.get("/leads", authMiddleware, roleMiddleware(["super_admin", "nurse", "doctor"]), listLeadsController);
+userRouter.post("/leads", authMiddleware, roleMiddleware(["super_admin", "nurse"]), createLeadController);
+userRouter.patch("/leads/:leadId", authMiddleware, roleMiddleware(["super_admin", "nurse"]), updateLeadController);
+userRouter.post("/leads/:leadId/convert", authMiddleware, roleMiddleware(["super_admin", "nurse"]), convertLeadController);
+
+// ── Billing: catalogue, invoices, payments, revenue ─────────────────
+userRouter.get("/billing/services", authMiddleware, roleMiddleware(["super_admin", "nurse", "doctor"]), listServicesController);
+userRouter.post("/billing/services", authMiddleware, roleMiddleware(["super_admin"]), createServiceController);
+userRouter.patch("/billing/services/:serviceId", authMiddleware, roleMiddleware(["super_admin"]), updateServiceController);
+userRouter.get("/billing/invoices", authMiddleware, roleMiddleware(["super_admin", "nurse"]), listInvoicesController);
+userRouter.post("/billing/invoices", authMiddleware, roleMiddleware(["super_admin", "nurse"]), createInvoiceController);
+userRouter.post("/billing/invoices/:invoiceId/cancel", authMiddleware, roleMiddleware(["super_admin"]), cancelInvoiceController);
+userRouter.post("/billing/invoices/:invoiceId/payments", authMiddleware, roleMiddleware(["super_admin", "nurse"]), recordPaymentController);
+userRouter.get("/billing/revenue-summary", authMiddleware, roleMiddleware(["super_admin"]), revenueSummaryController);
+
+// ── Service funnel (recommendations) ─────────────────────────────────
+userRouter.get("/recommendations", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), listRecommendationsController);
+userRouter.post("/recommendations", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), createRecommendationController);
+userRouter.patch("/recommendations/:recommendationId", authMiddleware, roleMiddleware(["super_admin", "doctor", "nurse"]), updateRecommendationStageController);
+
+// ── Enrollments / renewals ───────────────────────────────────────────
+userRouter.get("/enrollments", authMiddleware, roleMiddleware(["super_admin", "nurse", "doctor"]), listEnrollmentsController);
+userRouter.patch("/enrollments/:enrollmentId", authMiddleware, roleMiddleware(["super_admin", "nurse"]), updateEnrollmentController);
+
+// ── Referral requests ────────────────────────────────────────────────
+userRouter.get("/referrals", authMiddleware, roleMiddleware(["super_admin", "nurse", "doctor"]), listReferralsController);
+userRouter.post("/referrals", authMiddleware, roleMiddleware(["super_admin", "nurse", "doctor"]), createReferralController);
+userRouter.patch("/referrals/:referralId", authMiddleware, roleMiddleware(["super_admin", "nurse"]), updateReferralController);
+
+// ── Google reviews (manual log) ──────────────────────────────────────
+userRouter.get("/google-reviews", authMiddleware, roleMiddleware(["super_admin", "nurse"]), listGoogleReviewsController);
+userRouter.post("/google-reviews", authMiddleware, roleMiddleware(["super_admin", "nurse"]), createGoogleReviewController);
+
+// ── Pre-consultation handover notes ──────────────────────────────────
+userRouter.get("/doctor/preconsultation-notes", authMiddleware, roleMiddleware(["doctor"]), listDoctorPreConsultationNotesController);
+userRouter.get("/appointments/:appointmentId/preconsultation", authMiddleware, roleMiddleware(["nurse", "doctor", "super_admin"]), getPreConsultationNoteController);
+userRouter.put("/appointments/:appointmentId/preconsultation", authMiddleware, roleMiddleware(["nurse"]), upsertPreConsultationNoteController);
+userRouter.post("/appointments/:appointmentId/preconsultation/acknowledge", authMiddleware, roleMiddleware(["doctor"]), acknowledgePreConsultationNoteController);
 userRouter.patch("/:userId", authMiddleware, roleMiddleware(["super_admin"]), updateUserController);
 userRouter.patch("/nurse/crm/:taskId", authMiddleware, roleMiddleware(["nurse"]), updateNurseCrmTaskController);
 userRouter.post("/:userId/generate-email", authMiddleware, roleMiddleware(["super_admin"]), generateUserEmailDraftController);

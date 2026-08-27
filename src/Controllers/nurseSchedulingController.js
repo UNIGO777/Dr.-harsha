@@ -1496,6 +1496,8 @@ export async function updateNurseAppointmentController(req, res) {
       appointment.scheduledAt = scheduledAt;
       appointment.endsAt = availability.endsAt;
       appointment.slotMinutes = availability.slotMinutes;
+      appointment.rescheduleCount = (appointment.rescheduleCount || 0) + 1;
+      appointment.lastRescheduledAt = new Date();
       addAppointmentNote(appointment, {
         type: "reschedule",
         channel: "desk",
@@ -1901,6 +1903,8 @@ export async function updateDoctorAppointmentController(req, res) {
       appointment.scheduledAt = scheduledAt;
       appointment.endsAt = availability.endsAt;
       appointment.slotMinutes = availability.slotMinutes;
+      appointment.rescheduleCount = (appointment.rescheduleCount || 0) + 1;
+      appointment.lastRescheduledAt = new Date();
       addAppointmentNote(appointment, {
         type: "reschedule",
         channel: "desk",
