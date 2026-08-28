@@ -3,11 +3,17 @@ Return ONLY valid JSON.
 Do not return markdown.
 Do not over-diagnose disease.
 Avoid alarmist language.
-Keep it clinically usable and simple.`;
+Keep it clinically usable and simple.
+
+TRANSCRIPTION DISCIPLINE: the vibration-sensation table is a transcription task,
+not a judgement call. Copy each site's voltage, displacement and status exactly
+as the report states them. Never derive a status from a number, never reuse one
+status across a whole foot, and leave a field null rather than guessing.`;
 
 export const PNS_ASSESSMENT_SCHEMA_HINT = `{
   "pns": {
     "vibrationSensation": {
+      // every "status" below must be exactly "Normal" | "Abnormal" | "Very Abnormal" (or null)
       "rightFoot": {
         "toe":                { "voltageV": null, "displacementUm": null, "status": null },
         "firstMetatarsalHead": { "voltageV": null, "displacementUm": null, "status": null },
@@ -49,15 +55,41 @@ export function buildPnsAssessmentUserPrompt({ patient, extractedText }) {
 SECTION A: VIBRATION SENSATION TEST
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 For EACH site on Right Foot and Left Foot extract:
-1. voltageV        — the voltage reading (number, in Volts, e.g. 7.13)
-2. displacementUm  — the displacement reading (number, in micrometres μm, e.g. 14.26)
-3. status          — one of: "Normal", "Reduced", or "Absent" (from the interpretation table)
+1. voltageV        — the voltage reading (number, in Volts, e.g. 29.43)
+2. displacementUm  — the displacement reading (number, in micrometres μm, e.g. 58.86)
+3. status          — EXACTLY one of: "Normal", "Abnormal", "Very Abnormal"
 
 Sites for each foot: Toe · First Metatarsal Head · Third Metatarsal Head · Fifth Metatarsal Head · Instep · Heel
+That is 12 rows in total (6 per foot).
 
-The report may show voltage and displacement as labelled callouts on a foot diagram AND a separate table listing Normal/Reduced/Absent. Extract both.
+STATUS RULES — read carefully, this is the most commonly mis-read part:
+• The ONLY permitted values are "Normal", "Abnormal", "Very Abnormal".
+  Never output "Reduced", "Absent", "Mild", "Severe" or any other word.
+• Every one of the 12 sites has its OWN status. Do NOT apply one status to a
+  whole foot. It is normal for sites on the same foot to differ — e.g. the Heel
+  can be "Abnormal" while every other site on that foot is "Very Abnormal".
+• NEVER infer status from the voltage number. Read the status the report states.
+• In the extracted text layer of these machines the status appears as an option
+  list that is TRUNCATED AT THE SELECTED VALUE — the LAST option on the line is
+  the answer:
+      "Toe : Normal : Abnormal : Very Abnormal"   → status is "Very Abnormal"
+      "Heel : Normal : Abnormal"                  → status is "Abnormal"
+      "Instep : Normal"                           → status is "Normal"
+  Do not treat these lines as "all options are possible" — take the last one.
+
+FOOT / ORDER RULES:
+• The site blocks appear in a fixed order: the FIRST six blocks are the RIGHT
+  foot, the NEXT six are the LEFT foot, each in the order
+  Toe → First → Third → Fifth Metatarsal Head → Instep → Heel.
+• On the printed foot diagram the foot drawn on the LEFT of the page is the
+  RIGHT foot (plantar view). If the diagram and the interpretation table seem to
+  disagree, the interpretation table wins.
+• Each site's voltage and displacement belong to that same site — keep the
+  pairing intact when you read them off the diagram callouts.
+
 Also capture clinicalNote (e.g. "This may be clinically co-related").
-If a value is missing or unclear, keep it null. Do not guess.
+If a value is genuinely missing or unreadable, keep it null. Do not guess, and
+do not copy a neighbouring site's value to fill a gap.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SECTION B: NERVE CONDUCTION STUDY (NCS)

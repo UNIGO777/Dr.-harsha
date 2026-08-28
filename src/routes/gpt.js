@@ -79,6 +79,7 @@ import {
 import { DIET_ASSESSMENT_SYSTEM_PROMPT, buildDietAssessmentUserPrompt } from "../AiPrompts/dietAssessmentPrompts.js";
 import { ANS_ASSESSMENT_SYSTEM_PROMPT, buildAnsAssessmentUserPrompt } from "../AiPrompts/ansAssessmentPrompts.js";
 import { PNS_ASSESSMENT_SYSTEM_PROMPT, buildPnsAssessmentUserPrompt } from "../AiPrompts/pnsAssessmentPrompts.js";
+import { applyVptParseToAiPayload } from "../utils/vptReportParser.js";
 import {
   ARTERIAL_HEALTH_SYSTEM_PROMPT,
   buildArterialHealthUserPrompt
@@ -2700,8 +2701,12 @@ async function generatePnsAssessmentWithAi({ openai, provider, patient, extracte
     null;
 
   const payload = parsed && typeof parsed === "object" ? parsed : {};
-  if (debug) payload.raw = raw;
-  return payload;
+  // These VPT machines print a fixed layout, so read the 12 site rows straight
+  // from the text instead of trusting the model to transcribe them. The AI
+  // still owns interpretation, flags, advice and NCS.
+  const merged = applyVptParseToAiPayload(payload, textForPrompt);
+  if (debug) merged.raw = raw;
+  return merged;
 }
 
 async function generateArterialHealthWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
