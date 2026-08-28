@@ -1,7 +1,6 @@
 import express from "express";
 import multer from "multer";
 import OpenAI from "openai";
-import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import ExcelJS from "exceljs";
 import crypto from "node:crypto";
@@ -80,6 +79,8 @@ import { DIET_ASSESSMENT_SYSTEM_PROMPT, buildDietAssessmentUserPrompt } from "..
 import { ANS_ASSESSMENT_SYSTEM_PROMPT, buildAnsAssessmentUserPrompt } from "../AiPrompts/ansAssessmentPrompts.js";
 import { PNS_ASSESSMENT_SYSTEM_PROMPT, buildPnsAssessmentUserPrompt } from "../AiPrompts/pnsAssessmentPrompts.js";
 import { applyVptParseToAiPayload } from "../utils/vptReportParser.js";
+import { buildFileParts, prepareAiFileInputs } from "../utils/aiFileParts.js";
+import { extractPdfText } from "../utils/pdfText.js";
 import {
   ARTERIAL_HEALTH_SYSTEM_PROMPT,
   buildArterialHealthUserPrompt
@@ -2771,19 +2772,25 @@ async function generateArterialHealthWithAi({ openai, provider, patient, extract
   return payload;
 }
 
-async function generateLungFunctionWithAi({ openai, provider, patient, extractedText, imageFiles, debug }) {
+async function generateLungFunctionWithAi({ openai, provider, patient, extractedText, imageFiles, pdfFiles, debug }) {
   const textForPrompt = requireString(extractedText) ? capTextForPrompt(extractedText, 30000) : "";
   const userPrompt = buildLungFunctionUserPrompt({ patient, extractedText: textForPrompt });
   const systemPrompt = LUNG_FUNCTION_SYSTEM_PROMPT;
 
   const resolvedProvider = normalizeAiProvider(provider);
+  // Spirometry printouts are usually scans with no text layer — send the PDF
+  // itself so the model can read it, and refuse rather than invent zeros.
+  const { documentFiles } = await prepareAiFileInputs({
+    extractedText,
+    pdfFiles,
+    imageFiles,
+    label: "spirometry report"
+  });
   let raw = "";
 
   if (resolvedProvider === "gemini") {
     const parts = [{ text: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}\n\n${userPrompt}` }];
-    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
-      parts.push({ inlineData: { mimeType: f.mimetype, data: f.buffer.toString("base64") } });
-    }
+    for (const part of buildFileParts({ provider: "gemini", imageFiles, documentFiles })) parts.push(part);
     const response = await geminiGenerateContent({
       parts,
       model: process.env.Gemini_model || getGeminiModel(),
@@ -2793,12 +2800,7 @@ async function generateLungFunctionWithAi({ openai, provider, patient, extracted
     raw = getTextFromGeminiGenerateContentResponse(response);
   } else if (resolvedProvider === "claude") {
     const parts = [{ type: "text", text: userPrompt }];
-    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
-      parts.push({
-        type: "image",
-        source: { type: "base64", media_type: f.mimetype, data: f.buffer.toString("base64") }
-      });
-    }
+    for (const part of buildFileParts({ provider: "claude", imageFiles, documentFiles })) parts.push(part);
     const response = await anthropicCreateJsonMessage({
       system: `${systemPrompt}${AI_OUTPUT_JSON_SUFFIX}`,
       messages: [{ role: "user", content: parts }],
@@ -2810,11 +2812,7 @@ async function generateLungFunctionWithAi({ openai, provider, patient, extracted
   } else {
     if (!openai) throw new Error("OpenAI client is not available");
     const contentParts = [{ type: "text", text: userPrompt }];
-    for (const f of Array.isArray(imageFiles) ? imageFiles : []) {
-      const b64 = f.buffer.toString("base64");
-      const dataUrl = `data:${f.mimetype};base64,${b64}`;
-      contentParts.push({ type: "image_url", image_url: { url: dataUrl } });
-    }
+    for (const part of buildFileParts({ provider: "openai", imageFiles, documentFiles })) contentParts.push(part);
     const completion = await openai.chat.completions.create({
       model: process.env.OPENAI_MODEL || "gpt-4o-mini",
       temperature: 0,
@@ -2838,9 +2836,12 @@ async function generateLungFunctionWithAi({ openai, provider, patient, extracted
 
   const table = Array.isArray(spirometry?.table) ? spirometry.table : [];
   const norm = (v) => (typeof v === "string" ? v.trim().toLowerCase() : "");
+  // A living patient cannot blow 0 L / 0 % / 0 L-min. A zero in spirometry always
+  // means "the model had nothing to read", so treat it as missing rather than let
+  // a fabricated 0 reach a clinical report.
   const pickNum = (v) => {
     const n = parseOptionalNumberLoose(v);
-    return Number.isFinite(n) ? n : null;
+    return Number.isFinite(n) && n > 0 ? n : null;
   };
   const pickObserved = (row) =>
     pickNum(
@@ -2880,13 +2881,16 @@ async function generateLungFunctionWithAi({ openai, provider, patient, extracted
   const fvcL = Number.isFinite(fvcCandidate) ? (fvcCandidate > 20 ? fvcCandidate / 1000 : fvcCandidate) : null;
 
   payload.spirometry = payload.spirometry && typeof payload.spirometry === "object" ? payload.spirometry : {};
+  // Use the sanitised candidates, not the raw keyValues: `raw ?? fallback` keeps
+  // a fabricated 0 (0 is not nullish), which is exactly how FEV1 = 0 reached the
+  // report. Every candidate below has already rejected non-positive values.
   payload.spirometry.keyValues = {
     ...keyValues,
-    fev1L: keyValues?.fev1L ?? (Number.isFinite(fev1L) ? fev1L : null),
-    fvcL: keyValues?.fvcL ?? (Number.isFinite(fvcL) ? fvcL : null),
-    fev1FvcPercent: keyValues?.fev1FvcPercent ?? (Number.isFinite(ratioCandidate) ? ratioCandidate : null),
-    pef: keyValues?.pef ?? (Number.isFinite(pefCandidate) ? pefCandidate : null),
-    fef25_75: keyValues?.fef25_75 ?? (Number.isFinite(fefCandidate) ? fefCandidate : null),
+    fev1L: Number.isFinite(fev1L) ? fev1L : null,
+    fvcL: Number.isFinite(fvcL) ? fvcL : null,
+    fev1FvcPercent: Number.isFinite(ratioCandidate) ? ratioCandidate : null,
+    pef: Number.isFinite(pefCandidate) ? pefCandidate : null,
+    fef25_75: Number.isFinite(fefCandidate) ? fefCandidate : null,
     units: keyValues?.units && typeof keyValues.units === "object" ? keyValues.units : { pef: "", fef25_75: "" }
   };
   payload.spirometry.interpretation =
@@ -4989,8 +4993,7 @@ async function extractPdfTextRawForPrompt(pdfFiles) {
   let extractedText = "";
   for (const f of Array.isArray(pdfFiles) ? pdfFiles : []) {
     if (extractedText.length >= maxPdfTextChars) break;
-    const parsed = await pdfParse(f.buffer);
-    const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+    const extracted = await extractPdfText(f.buffer);
     const trimmed = extracted.trim();
     if (!trimmed) continue;
     const capped = trimmed.length > 20000 ? trimmed.slice(0, 20000) : trimmed;
@@ -5005,8 +5008,7 @@ async function extractPdfTextForPrompt(pdfFiles) {
   let extractedText = "";
   for (const f of pdfFiles) {
     if (extractedText.length >= maxPdfTextChars) break;
-    const parsed = await pdfParse(f.buffer);
-    const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+    const extracted = await extractPdfText(f.buffer);
     const capped = capTextForPromptWithAnchors(extracted, 12000, [
       "Complete Urinogram",
       "Urinogram",
@@ -5027,8 +5029,9 @@ async function extractPdfTextForBloodPrompt(pdfFiles) {
   let extractedText = "";
   for (const f of pdfFiles) {
     if (extractedText.length >= maxPdfTextChars) break;
-    const parsed = await pdfParse(f.buffer);
-    const extracted = typeof parsed?.text === "string" ? parsed.text : "";
+    // extractPdfText never throws: a malformed or image-only PDF returns "" and
+    // the caller falls back to sending the file to the model as a document.
+    const extracted = await extractPdfText(f.buffer);
     const trimmed = extracted.trim();
     if (!trimmed) continue;
     const next = `\n\n[PDF: ${f.originalname}]\n${trimmed}`;

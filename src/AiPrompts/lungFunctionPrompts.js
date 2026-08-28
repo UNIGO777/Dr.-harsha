@@ -61,6 +61,9 @@ Rules:
 - Return ONLY valid JSON.
 - Do NOT add your own clinical advice or conclusions.
 - If a section is not present, keep it empty (nulls/empty strings/empty arrays).
+- NEVER write 0 for a spirometry measurement. A living patient cannot blow
+  0 L, 0 % or 0 L/min, so 0 always means "I could not read this value" —
+  use null instead. Do not estimate or infer values that are not printed.
 - Prefer numbers for fev1L, fvcL and fev1FvcPercent.
 - fev1L and fvcL must be in liters (L). If the report shows mL, convert to L.
 - fev1FvcPercent should be a percent number (example: 75.99). Do not return a ratio here.

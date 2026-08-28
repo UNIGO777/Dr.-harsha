@@ -46,6 +46,7 @@ export function createLungFunctionClaudeHandler(getContext) {
         patient: normalized.patient,
         extractedText,
         imageFiles,
+        pdfFiles,
         debug: debugAi
       });
 

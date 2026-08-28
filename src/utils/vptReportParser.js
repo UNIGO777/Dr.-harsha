@@ -59,9 +59,11 @@ const SITE_LABEL_TO_KEY = {
   heel: "heel"
 };
 
-// Site header + its trailing option list, e.g. "Toe : Normal : Abnormal : Very Abnormal"
+// Site header + its option list. The list ends at the selected value, so
+// "Toe : Normal: Abnormal: Very Abnormal" means Very Abnormal.
+// Bounded to status words so a two-column table line yields one match per foot.
 const SITE_LINE_RE =
-  /(Toe|First Metatarsal Head|1st Metatarsal Head|Third Metatarsal Head|3rd Metatarsal Head|Fifth Metatarsal Head|5th Metatarsal Head|Instep|Heel)\s*:\s*([^\r\n]*)/gi;
+  /(Toe|First Metatarsal Head|1st Metatarsal Head|Third Metatarsal Head|3rd Metatarsal Head|Fifth Metatarsal Head|5th Metatarsal Head|Instep|Heel)\s*:\s*((?:\s*(?:Very\s+Abnormal|Abnormal|Normal)\s*:?)+)/gi;
 
 // Readings. µ may be MICRO SIGN (U+00B5) or GREEK SMALL LETTER MU (U+03BC).
 const VOLTAGE_RE = /(\d+(?:\.\d+)?)\s*V(?![a-z])/gi;
@@ -104,28 +106,42 @@ export function parseVptReportText(rawText) {
     status: statusFromOptionList(m[2])
   })).filter((site) => site.key);
 
-  const voltages = collect(VOLTAGE_RE, text, (m) => Number(m[1]));
-  const displacements = collect(DISPLACEMENT_RE, text, (m) => Number(m[1]));
+  // Six sites per foot, both feet — anything else is a layout we do not
+  // recognise, and we refuse rather than emit half-right data.
+  if (sites.length !== 12) return null;
 
-  // Expect exactly 12 of each — 6 sites per foot. Anything else means a layout
-  // we do not recognise, so we refuse rather than emit half-right data.
-  if (sites.length !== 12 || voltages.length !== 12 || displacements.length !== 12) return null;
-
-  // The 12 site headers must be two clean runs of the canonical six.
-  const expected = [...SITE_ORDER, ...SITE_ORDER];
+  // Two layouts occur in the wild, told apart by whether a site repeats
+  // immediately:
+  //   paired      — the printed two-column table: R.Toe, L.Toe, R.1st, L.1st …
+  //   sequential  — a linearised export: all six right sites, then all six left
+  const isPaired = sites[0].key === sites[1].key;
+  const expected = isPaired
+    ? SITE_ORDER.flatMap((key) => [key, key])
+    : [...SITE_ORDER, ...SITE_ORDER];
   if (!sites.every((site, index) => site.key === expected[index])) return null;
 
   const rightFoot = buildEmptyFoot();
   const leftFoot = buildEmptyFoot();
 
   sites.forEach((site, index) => {
-    const foot = index < 6 ? rightFoot : leftFoot;
-    foot[site.key] = {
-      voltageV: Number.isFinite(voltages[index]) ? voltages[index] : null,
-      displacementUm: Number.isFinite(displacements[index]) ? displacements[index] : null,
-      status: site.status
-    };
+    const foot = isPaired ? (index % 2 === 0 ? rightFoot : leftFoot) : index < 6 ? rightFoot : leftFoot;
+    foot[site.key].status = site.status;
   });
+
+  // Readings only line up with sites in the sequential layout. In the printed
+  // table the numbers are diagram callouts laid out across both feet, so we
+  // leave the values to the model rather than guess the pairing.
+  if (!isPaired) {
+    const voltages = collect(VOLTAGE_RE, text, (m) => Number(m[1]));
+    const displacements = collect(DISPLACEMENT_RE, text, (m) => Number(m[1]));
+    if (voltages.length === 12 && displacements.length === 12) {
+      sites.forEach((site, index) => {
+        const foot = index < 6 ? rightFoot : leftFoot;
+        if (Number.isFinite(voltages[index])) foot[site.key].voltageV = voltages[index];
+        if (Number.isFinite(displacements[index])) foot[site.key].displacementUm = displacements[index];
+      });
+    }
+  }
 
   const clinicalNoteMatch = text.match(/This may be clinically co[- ]?related/i);
 
@@ -133,6 +149,7 @@ export function parseVptReportText(rawText) {
     rightFoot,
     leftFoot,
     clinicalNote: clinicalNoteMatch ? clinicalNoteMatch[0] : "",
+    layout: isPaired ? "table" : "sequential",
     confidence: sites.every((s) => s.status) ? "high" : "partial"
   };
 }

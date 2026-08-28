@@ -48,6 +48,7 @@ export function createLungFunctionOpenAIHandler(getContext) {
         patient: normalized.patient,
         extractedText,
         imageFiles,
+        pdfFiles,
         debug: debugAi
       });
 
