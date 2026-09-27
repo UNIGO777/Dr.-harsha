@@ -65,6 +65,7 @@ function buildMedicationResponse(medication) {
     additionalInfo: medication.additionalInfo || "",
     startDate: medication.startDate || null,
     endDate: medication.endDate || null,
+    expiryDate: medication.expiryDate || null,
     createdAt: medication.createdAt || null,
     updatedAt: medication.updatedAt || null
   };
@@ -332,6 +333,7 @@ export async function addAdminPatientMedicationController(req, res) {
 
     const startDate = req?.body?.startDate ? new Date(req.body.startDate) : null;
     const endDate = req?.body?.endDate ? new Date(req.body.endDate) : null;
+    const expiryDate = req?.body?.expiryDate ? new Date(req.body.expiryDate) : null;
 
     profile.medications.push({
       medicineName,
@@ -344,7 +346,8 @@ export async function addAdminPatientMedicationController(req, res) {
       foodTiming,
       additionalInfo,
       startDate: startDate && !isNaN(startDate.getTime()) ? startDate : null,
-      endDate: endDate && !isNaN(endDate.getTime()) ? endDate : null
+      endDate: endDate && !isNaN(endDate.getTime()) ? endDate : null,
+      expiryDate: expiryDate && !isNaN(expiryDate.getTime()) ? expiryDate : null
     });
     profile.lastInteractionAt = new Date();
     await profile.save();
@@ -420,6 +423,10 @@ export async function updateAdminPatientMedicationController(req, res) {
     if (body.startDate !== undefined) {
       const sd = body.startDate ? new Date(body.startDate) : null;
       medication.startDate = sd && !isNaN(sd.getTime()) ? sd : null;
+    }
+    if (body.expiryDate !== undefined) {
+      const xd = body.expiryDate ? new Date(body.expiryDate) : null;
+      medication.expiryDate = xd && !isNaN(xd.getTime()) ? xd : null;
     }
     if (body.endDate !== undefined) {
       const ed = body.endDate ? new Date(body.endDate) : null;

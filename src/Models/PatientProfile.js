@@ -47,7 +47,10 @@ const patientMedicationSchema = new mongoose.Schema(
     },
     additionalInfo: { type: String, trim: true, default: "" },
     startDate: { type: Date, default: null },
-    endDate: { type: Date, default: null }
+    endDate: { type: Date, default: null },
+    // Printed expiry on the pack — unrelated to endDate, which is when the
+    // course finishes. A pack can expire before the course does.
+    expiryDate: { type: Date, default: null }
   },
   { _id: true, timestamps: true }
 );

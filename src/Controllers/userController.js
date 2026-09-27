@@ -273,6 +273,7 @@ function buildPatientMedicationResponse(medication) {
     additionalInfo: medication.additionalInfo || "",
     startDate: medication.startDate || null,
     endDate: medication.endDate || null,
+    expiryDate: medication.expiryDate || null,
     createdAt: medication.createdAt || null,
     updatedAt: medication.updatedAt || null
   };
@@ -1403,6 +1404,7 @@ export async function addPatientMedicationController(req, res) {
 
     const startDate = req?.body?.startDate ? new Date(req.body.startDate) : null;
     const endDate = req?.body?.endDate ? new Date(req.body.endDate) : null;
+    const expiryDate = req?.body?.expiryDate ? new Date(req.body.expiryDate) : null;
 
     patientProfile.medications.push({
       medicineName,
@@ -1415,7 +1417,8 @@ export async function addPatientMedicationController(req, res) {
       foodTiming,
       additionalInfo,
       startDate: startDate && !isNaN(startDate.getTime()) ? startDate : null,
-      endDate: endDate && !isNaN(endDate.getTime()) ? endDate : null
+      endDate: endDate && !isNaN(endDate.getTime()) ? endDate : null,
+      expiryDate: expiryDate && !isNaN(expiryDate.getTime()) ? expiryDate : null
     });
     patientProfile.lastInteractionAt = new Date();
     await patientProfile.save();

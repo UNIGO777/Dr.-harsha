@@ -10,6 +10,7 @@ function buildMedicationResponse(med) {
     timeSlots: med.timeSlots || [],
     foodTiming: med.foodTiming,
     additionalInfo: med.additionalInfo || "",
+    expiryDate: med.expiryDate || null,
     doctor: med.doctor
       ? { id: med.doctor._id?.toString?.() || med.doctor.toString(), name: med.doctor.name || "" }
       : null,
