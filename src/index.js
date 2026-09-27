@@ -12,6 +12,7 @@ import { patientRouter } from "./routes/patientRoutes.js";
 import { nurseRouter } from "./routes/nurseRoutes.js";
 import { connectDb } from "./utils/connectDb.js";
 import { startBackupScheduler } from "./utils/backupScheduler.js";
+import { getMailHealth, verifyMailTransport } from "./utils/emailService.js";
 import { authMiddleware } from "./middlewares/authMiddleware.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -119,7 +120,8 @@ app.use((req, res, next) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true });
+  const mail = getMailHealth();
+  res.json({ ok: true, db: !!req.app.locals.dbReady, mail });
 });
 
 // Auth routes — no token required
@@ -173,6 +175,11 @@ async function start() {
 
     const server = app.listen(port, "0.0.0.0", () => {
       console.log(`API listening on http://localhost:${port}`);
+    });
+
+    // Surface a dead mail account at boot — every OTP depends on it
+    verifyMailTransport().then((result) => {
+      if (result.ok) console.log("[Startup] SMTP: OK (outgoing email working)");
     });
 
     if (process.env.BACKUP_ENABLED === "true") {

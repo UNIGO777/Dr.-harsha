@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { User } from "../Models/User.js";
 import { createUserNotification, fetchUserNotifications } from "./notificationController.js";
-import { sendAccountUpdateOtpEmail, sendLoginOtpEmail } from "../utils/emailService.js";
+import {
+  sendAccountUpdateOtpEmail, sendLoginOtpEmail } from "../utils/emailService.js";
 import {
   buildAccessToken,
   buildAuthPayload,
@@ -104,6 +105,20 @@ async function buildSessionResponse(user, message) {
   };
 }
 
+/**
+ * Mail-provider failures are upstream outages, not client errors: answer 502
+ * with a safe message and keep the SMTP reply in the server log. Leaking it
+ * told anyone hitting /login which provider we use and why it was refusing.
+ */
+function respondWithAuthError(res, err, fallbackMessage) {
+  if (err?.isMailDeliveryError) {
+    console.error(`[auth] mail delivery failed (${err.provider}): ${err.message}`);
+    return res.status(502).json({ error: err.publicMessage });
+  }
+  const message = err instanceof Error ? err.message : fallbackMessage;
+  return res.status(500).json({ error: message || fallbackMessage });
+}
+
 export async function requestLoginOtpController(req, res) {
   try {
     if (!req?.app?.locals?.dbReady) return res.status(500).json({ error: "Database not configured" });
@@ -131,7 +146,7 @@ export async function requestLoginOtpController(req, res) {
       role: user.role
     });
   } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to send OTP" });
+    return respondWithAuthError(res, err, "Failed to send OTP");
   }
 }
 
@@ -185,7 +200,7 @@ export async function requestForgotPasswordOtpController(req, res) {
 
     return res.json({ message: "If an account exists for this email, an OTP has been sent." });
   } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to send forgot password OTP" });
+    return respondWithAuthError(res, err, "Failed to send forgot password OTP");
   }
 }
 
@@ -332,7 +347,7 @@ export async function requestUpdateEmailOtpController(req, res) {
 
     return res.json({ message: "OTP sent to your current email address" });
   } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to send email update OTP" });
+    return respondWithAuthError(res, err, "Failed to send email update OTP");
   }
 }
 
@@ -438,7 +453,7 @@ export async function requestUpdatePasswordOtpController(req, res) {
 
     return res.json({ message: "OTP sent to your current email address" });
   } catch (err) {
-    return res.status(500).json({ error: err instanceof Error ? err.message : "Failed to send password update OTP" });
+    return respondWithAuthError(res, err, "Failed to send password update OTP");
   }
 }
 
